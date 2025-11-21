@@ -3,14 +3,14 @@ import pandas as pd
 import numpy as np
 import re
 from io import BytesIO
-from datetime import datetime, date
+from datetime import date
 
 st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 
-st.title("🔍 Reporte de facturas no pagadas")
+st.title("🔍 Reporte de facturas no pagadas por cuenta contable")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
-    "y el sistema identificará las facturas no pagadas por cliente."
+    "y el sistema identificará las facturas no pagadas, agrupadas por número de cuenta y nombre de cuenta."
 )
 
 @st.cache_data
@@ -39,7 +39,7 @@ def parse_spanish_date(s: str):
 def procesar_archivo(file) -> pd.DataFrame:
     """
     Lee el Excel de CONTPAQ y regresa un DataFrame de facturas (una fila por factura)
-    con su saldo pendiente por cliente.
+    con su saldo pendiente por cuenta contable (account_code + account_name).
     """
     # Leer tal cual, sin encabezados
     raw = pd.read_excel(file, header=None)
@@ -88,12 +88,12 @@ def procesar_archivo(file) -> pd.DataFrame:
     # Nos quedamos solo con movimientos que tienen número de factura
     movs_valid = movs[movs["referencia"].notna()].copy()
 
-    # Agrupamos por cliente + referencia (factura)
+    # Agrupamos por cuenta contable (account_code + account_name) + referencia (factura)
     group_cols = ["account_code", "account_name", "referencia"]
     facturas = (
         movs_valid.groupby(group_cols)
         .agg(
-            fecha_factura=("fecha", "min"),
+            fecha_factura=("fecha", "min"),      # fecha más antigua de la factura
             cargos_total=("cargos", "sum"),
             abonos_total=("abonos", "sum"),
         )
@@ -105,15 +105,16 @@ def procesar_archivo(file) -> pd.DataFrame:
     return facturas
 
 
-def filtrar_facturas(df_facturas: pd.DataFrame, fecha_desde: date, fecha_hasta: date, clientes_sel):
+def filtrar_facturas(df_facturas: pd.DataFrame, fecha_desde: date, fecha_hasta: date, cuentas_sel):
+    """Filtra por rango de fechas y por cuenta contable (account_code + account_name)."""
     mask = pd.Series(True, index=df_facturas.index)
 
     if fecha_desde:
         mask &= df_facturas["fecha_factura"] >= pd.to_datetime(fecha_desde)
     if fecha_hasta:
         mask &= df_facturas["fecha_factura"] <= pd.to_datetime(fecha_hasta)
-    if clientes_sel:
-        mask &= df_facturas["account_name"].isin(clientes_sel)
+    if cuentas_sel:
+        mask &= df_facturas["cuenta"].isin(cuentas_sel)
 
     return df_facturas[mask].copy()
 
@@ -142,6 +143,12 @@ else:
     # Solo facturas con saldo pendiente > 0
     facturas_pend = facturas[facturas["saldo_factura"] > 0].copy()
 
+    # Columna que representa la cuenta contable como en el Excel: código + nombre
+    facturas_pend["cuenta"] = (
+        facturas_pend["account_code"].astype(str) + " - " +
+        facturas_pend["account_name"].astype(str)
+    )
+
     if facturas_pend.empty:
         st.success("✅ No se encontraron facturas con saldo pendiente en el archivo.")
     else:
@@ -166,16 +173,20 @@ else:
                 max_value=max_date.date() if pd.notna(max_date) else None,
             )
 
-        clientes = sorted(facturas_pend["account_name"].dropna().unique().tolist())
-        clientes_sel = st.multiselect(
-            "Clientes (cuentas contables)", options=clientes, default=[]
+        # Selector por cuenta contable (número de cuenta + nombre)
+        cuentas = sorted(facturas_pend["cuenta"].dropna().unique().tolist())
+        cuentas_sel = st.multiselect(
+            "Cuenta contable (número de cuenta + nombre de cuenta)",
+            options=cuentas,
+            default=[]
         )
 
         facturas_filtradas = filtrar_facturas(
-            facturas_pend, fecha_desde, fecha_hasta, clientes_sel
+            facturas_pend, fecha_desde, fecha_hasta, cuentas_sel
         )
 
-        st.subheader("📊 Resumen por cliente")
+        # ===== Resumen por cuenta =====
+        st.subheader("📊 Resumen por cuenta contable")
 
         resumen = (
             facturas_filtradas.groupby(["account_code", "account_name"])
@@ -201,20 +212,45 @@ else:
 
         st.dataframe(resumen, use_container_width=True)
 
-        st.subheader("📄 Detalle de facturas pendientes")
-        st.dataframe(
-            facturas_filtradas.sort_values(
-                ["account_name", "fecha_factura", "referencia"]
-            ),
-            use_container_width=True,
+        # ===== Detalle agrupado por cuenta (imitando bloques del Excel) =====
+        st.subheader("📄 Detalle de facturas pendientes por cuenta contable")
+
+        # Ordenamos por cuenta y fecha
+        facturas_detalle = facturas_filtradas.sort_values(
+            ["account_code", "account_name", "fecha_factura", "referencia"]
         )
 
-        # Descarga
-        xls_bytes = to_excel(facturas_filtradas)
+        for (code, name), grp in facturas_detalle.groupby(
+            ["account_code", "account_name"], sort=False
+        ):
+            total_cuenta = grp["saldo_factura"].sum()
+            num_facturas = grp["referencia"].nunique()
+
+            titulo = (
+                f"{code} - {name}  |  {num_facturas} facturas  |  "
+                f"saldo pendiente ${total_cuenta:,.2f}"
+            )
+
+            with st.expander(titulo, expanded=False):
+                st.dataframe(
+                    grp[
+                        [
+                            "referencia",
+                            "fecha_factura",
+                            "cargos_total",
+                            "abonos_total",
+                            "saldo_factura",
+                        ]
+                    ].sort_values(["fecha_factura", "referencia"]),
+                    use_container_width=True,
+                )
+
+        # ===== Descarga de detalle =====
+        xls_bytes = to_excel(facturas_detalle)
         st.download_button(
-            label="⬇️ Descargar detalle en Excel",
+            label="⬇️ Descargar detalle en Excel (agrupado por cuenta contable)",
             data=xls_bytes,
-            file_name="facturas_pendientes.xlsx",
+            file_name="facturas_pendientes_por_cuenta.xlsx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
