@@ -10,8 +10,14 @@ st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 st.title("🔍 Autitoria Integracion de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
-    "y el sistema identificará las facturas no pagadas, agrupadas por número de cuenta y nombre de cuenta."
+    "y el sistema identificará las facturas no pagadas, con dos vistas: "
+    "**por factura (global)** y **por cuenta contable (sin cruzar cuentas)**."
 )
+
+# --------------------------------------------------------------------
+# Utilidades
+# --------------------------------------------------------------------
+
 
 @st.cache_data
 def parse_spanish_date(s: str):
@@ -24,9 +30,18 @@ def parse_spanish_date(s: str):
         return pd.NaT
     day, mon_abbr, year = m.groups()
     month_map = {
-        'Ene': '01', 'Feb': '02', 'Mar': '03', 'Abr': '04',
-        'May': '05', 'Jun': '06', 'Jul': '07', 'Ago': '08',
-        'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dic': '12',
+        "Ene": "01",
+        "Feb": "02",
+        "Mar": "03",
+        "Abr": "04",
+        "May": "05",
+        "Jun": "06",
+        "Jul": "07",
+        "Ago": "08",
+        "Sep": "09",
+        "Oct": "10",
+        "Nov": "11",
+        "Dic": "12",
     }
     mon_key = mon_abbr[:3].title()
     if mon_key not in month_map:
@@ -36,18 +51,19 @@ def parse_spanish_date(s: str):
 
 
 @st.cache_data
-def procesar_archivo(file) -> pd.DataFrame:
+def procesar_movimientos(file) -> pd.DataFrame:
     """
-    Lee el Excel de CONTPAQ y regresa un DataFrame de facturas (una fila por factura)
-    con su saldo pendiente por cuenta contable (account_code + account_name).
+    Lee el Excel de CONTPAQ y regresa un DataFrame de movimientos válidos
+    (solo filas con fecha y referencia de factura), con cuenta contable asignada.
     """
     # Leer tal cual, sin encabezados
     raw = pd.read_excel(file, header=None)
 
     # Detectar filas cabecera de cuenta (tienen el código de cuenta y 'Saldo inicial :')
     account_pattern = re.compile(r"^\d{3}-\d{3}-\d{3}-\d{3}$")
-    is_account_header = raw[0].astype(str).str.match(account_pattern) & \
-                        raw[6].astype(str).str.contains("Saldo inicial", na=False)
+    is_account_header = raw[0].astype(str).str.match(account_pattern) & raw[
+        6
+    ].astype(str).str.contains("Saldo inicial", na=False)
 
     # Rellenar código y nombre de cuenta hacia abajo
     df = raw.copy()
@@ -88,35 +104,94 @@ def procesar_archivo(file) -> pd.DataFrame:
     # Nos quedamos solo con movimientos que tienen número de factura
     movs_valid = movs[movs["referencia"].notna()].copy()
 
-    # Agrupamos por cuenta contable (account_code + account_name) + referencia (factura)
-    group_cols = ["account_code", "account_name", "referencia"]
+    return movs_valid
+
+
+@st.cache_data
+def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye facturas a nivel global (por referencia), cruzando todas las cuentas.
+    Asigna una 'cuenta principal' por factura (normalmente donde está el cargo).
+    """
+    # 1) Agregados globales por referencia
     facturas = (
-        movs_valid.groupby(group_cols)
+        movs_valid.groupby("referencia")
         .agg(
-            fecha_factura=("fecha", "min"),      # fecha más antigua de la factura
+            fecha_factura=("fecha", "min"),
             cargos_total=("cargos", "sum"),
             abonos_total=("abonos", "sum"),
         )
         .reset_index()
     )
 
+    # 2) Determinar cuenta principal (preferimos donde haya cargos positivos)
+    movs_valid = movs_valid.copy()
+    movs_valid["es_cargo_pos"] = movs_valid["cargos"] > 0
+
+    # a) Principal desde cargos positivos (factura original)
+    main_from_cargo = (
+        movs_valid[movs_valid["es_cargo_pos"]]
+        .sort_values(["referencia", "cargos"], ascending=[True, False])
+        .drop_duplicates("referencia")
+        [["referencia", "account_code", "account_name"]]
+    )
+
+    # b) Para referencias sin cargos positivos, tomar el primer movimiento que aparezca
+    main_any = (
+        movs_valid.sort_values(["referencia", "fecha"])
+        .drop_duplicates("referencia")
+        [["referencia", "account_code", "account_name"]]
+    )
+
+    main_account = pd.concat([main_from_cargo, main_any], ignore_index=True)
+    main_account = main_account.drop_duplicates("referencia", keep="first")
+
+    facturas = facturas.merge(main_account, on="referencia", how="left")
+
+    # 3) Número de cuentas involucradas por referencia
+    cuentas_por_factura = (
+        movs_valid.groupby("referencia")["account_code"]
+        .nunique()
+        .reset_index(name="num_cuentas")
+    )
+    facturas = facturas.merge(cuentas_por_factura, on="referencia", how="left")
+    facturas["num_cuentas"] = facturas["num_cuentas"].fillna(0).astype(int)
+    facturas["cruza_cuentas"] = facturas["num_cuentas"] > 1
+
+    # 4) Saldo pendiente
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
 
     return facturas
 
 
-def filtrar_facturas(df_facturas: pd.DataFrame, fecha_desde: date, fecha_hasta: date, cuentas_sel):
-    """Filtra por rango de fechas y por cuenta contable (account_code + account_name)."""
-    mask = pd.Series(True, index=df_facturas.index)
+@st.cache_data
+def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye facturas por cuenta contable (sin cruzar cuentas).
+    Una misma referencia puede aparecer en varias cuentas.
+    """
+    group_cols = ["account_code", "account_name", "referencia"]
+    facturas = (
+        movs_valid.groupby(group_cols)
+        .agg(
+            fecha_factura=("fecha", "min"),
+            cargos_total=("cargos", "sum"),
+            abonos_total=("abonos", "sum"),
+        )
+        .reset_index()
+    )
+    facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
+    return facturas
 
+
+def filtrar_por_fecha(df: pd.DataFrame, fecha_desde: date, fecha_hasta: date) -> pd.DataFrame:
+    """Filtra un DataFrame de facturas por rango de fechas."""
+    mask = pd.Series(True, index=df.index)
     if fecha_desde:
-        mask &= df_facturas["fecha_factura"] >= pd.to_datetime(fecha_desde)
+        mask &= df["fecha_factura"] >= pd.to_datetime(fecha_desde)
     if fecha_hasta:
-        mask &= df_facturas["fecha_factura"] <= pd.to_datetime(fecha_hasta)
-    if cuentas_sel:
-        mask &= df_facturas["cuenta"].isin(cuentas_sel)
-
-    return df_facturas[mask].copy()
+        mask &= df["fecha_factura"] <= pd.to_datetime(fecha_hasta)
+    return df[mask].copy()
 
 
 def to_excel(df: pd.DataFrame) -> bytes:
@@ -126,9 +201,13 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+# --------------------------------------------------------------------
+# App
+# --------------------------------------------------------------------
+
 uploaded_file = st.file_uploader(
     "📎 Sube el archivo Excel de movimientos (auxiliares del catálogo)",
-    type=["xlsx"]
+    type=["xlsx"],
 )
 
 if uploaded_file is None:
@@ -138,24 +217,35 @@ if uploaded_file is None:
     )
 else:
     with st.spinner("Procesando archivo..."):
-        facturas = procesar_archivo(uploaded_file)
+        movs_valid = procesar_movimientos(uploaded_file)
+        facturas_global = construir_facturas_global(movs_valid)
+        facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
     # Solo facturas con saldo pendiente > 0
-    facturas_pend = facturas[facturas["saldo_factura"] > 0].copy()
+    facturas_global_pend = facturas_global[facturas_global["saldo_factura"] > 0].copy()
+    facturas_cuenta_pend = facturas_cuenta[facturas_cuenta["saldo_factura"] > 0].copy()
 
-    # Columna que representa la cuenta contable como en el Excel: código + nombre
-    facturas_pend["cuenta"] = (
-        facturas_pend["account_code"].astype(str) + " - " +
-        facturas_pend["account_name"].astype(str)
-    )
-
-    if facturas_pend.empty:
+    if facturas_global_pend.empty and facturas_cuenta_pend.empty:
         st.success("✅ No se encontraron facturas con saldo pendiente en el archivo.")
     else:
-        st.subheader("📌 Filtros")
+        # Columna 'cuenta' como en el Excel: código + nombre
+        for df in (facturas_global_pend, facturas_cuenta_pend):
+            df["cuenta"] = (
+                df["account_code"].astype(str) + " - " + df["account_name"].astype(str)
+            )
 
-        min_date = facturas_pend["fecha_factura"].min()
-        max_date = facturas_pend["fecha_factura"].max()
+        # Rango de fechas global para filtros
+        all_fechas = pd.concat(
+            [
+                facturas_global_pend["fecha_factura"],
+                facturas_cuenta_pend["fecha_factura"],
+            ]
+        ).dropna()
+
+        min_date = all_fechas.min()
+        max_date = all_fechas.max()
+
+        st.subheader("📌 Filtros de periodo")
 
         col_f1, col_f2 = st.columns(2)
         with col_f1:
@@ -173,86 +263,213 @@ else:
                 max_value=max_date.date() if pd.notna(max_date) else None,
             )
 
-        # Selector por cuenta contable (número de cuenta + nombre)
-        cuentas = sorted(facturas_pend["cuenta"].dropna().unique().tolist())
-        cuentas_sel = st.multiselect(
-            "Cuenta contable (número de cuenta + nombre de cuenta)",
-            options=cuentas,
-            default=[]
+        # ----------------------------------------------------------------
+        # Vistas en pestañas
+        # ----------------------------------------------------------------
+        tab_global, tab_cuenta = st.tabs(
+            ["📑 Por factura (global)", "📂 Por cuenta contable (sin cruzar cuentas)"]
         )
 
-        facturas_filtradas = filtrar_facturas(
-            facturas_pend, fecha_desde, fecha_hasta, cuentas_sel
-        )
-
-        # ===== Resumen por cuenta =====
-        st.subheader("📊 Resumen por cuenta contable")
-
-        resumen = (
-            facturas_filtradas.groupby(["account_code", "account_name"])
-            .agg(
-                facturas_pendientes=("referencia", "nunique"),
-                saldo_pendiente_total=("saldo_factura", "sum"),
-            )
-            .reset_index()
-            .sort_values("saldo_pendiente_total", ascending=False)
-        )
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric(
-                "Total de facturas pendientes",
-                value=int(resumen["facturas_pendientes"].sum()),
-            )
-        with c2:
-            st.metric(
-                "Saldo pendiente total",
-                value=f"${resumen['saldo_pendiente_total'].sum():,.2f}",
+        # ================================================================
+        # TAB 1: Por factura (global)
+        # ================================================================
+        with tab_global:
+            st.markdown("### Vista por factura (global)")
+            st.caption(
+                "Agrupa por **referencia de factura**, cruzando todas las cuentas de clientes. "
+                "Muestra cuánto falta por cobrar por factura a nivel global."
             )
 
-        st.dataframe(resumen, use_container_width=True)
-
-        # ===== Detalle agrupado por cuenta (imitando bloques del Excel) =====
-        st.subheader("📄 Detalle de facturas pendientes por cuenta contable")
-
-        # Ordenamos por cuenta y fecha
-        facturas_detalle = facturas_filtradas.sort_values(
-            ["account_code", "account_name", "fecha_factura", "referencia"]
-        )
-
-        for (code, name), grp in facturas_detalle.groupby(
-            ["account_code", "account_name"], sort=False
-        ):
-            total_cuenta = grp["saldo_factura"].sum()
-            num_facturas = grp["referencia"].nunique()
-
-            titulo = (
-                f"{code} - {name}  |  {num_facturas} facturas  |  "
-                f"saldo pendiente ${total_cuenta:,.2f}"
+            df_tab1 = filtrar_por_fecha(
+                facturas_global_pend, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
             )
 
-            with st.expander(titulo, expanded=False):
-                st.dataframe(
-                    grp[
+            # Filtro opcional por cuenta principal
+            cuentas_global = (
+                df_tab1["cuenta"].dropna().sort_values().unique().tolist()
+            )
+            cuentas_sel_global = st.multiselect(
+                "Cuenta principal (opcional)",
+                options=cuentas_global,
+                default=[],
+                key="cuentas_global",
+            )
+            if cuentas_sel_global:
+                df_tab1 = df_tab1[df_tab1["cuenta"].isin(cuentas_sel_global)]
+
+            if df_tab1.empty:
+                st.info("No hay facturas pendientes en este rango de fechas / filtros.")
+            else:
+                # Resumen por cuenta principal
+                st.subheader("📊 Resumen por cuenta principal (global)")
+
+                resumen_global = (
+                    df_tab1.groupby(["account_code", "account_name"])
+                    .agg(
+                        facturas_pendientes=("referencia", "nunique"),
+                        saldo_pendiente_total=("saldo_factura", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values("saldo_pendiente_total", ascending=False)
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric(
+                        "Total de facturas pendientes (global)",
+                        value=int(df_tab1["referencia"].nunique()),
+                    )
+                with c2:
+                    st.metric(
+                        "Saldo pendiente total (global)",
+                        value=f"${df_tab1['saldo_factura'].sum():,.2f}",
+                    )
+
+                st.dataframe(resumen_global, use_container_width=True)
+
+                # Detalle por factura
+                st.subheader("📄 Detalle de facturas (global)")
+
+                cols_detalle_global = [
+                    "referencia",
+                    "fecha_factura",
+                    "cargos_total",
+                    "abonos_total",
+                    "saldo_factura",
+                    "account_code",
+                    "account_name",
+                    "num_cuentas",
+                    "cruza_cuentas",
+                ]
+
+                df_detalle_global = df_tab1[cols_detalle_global].sort_values(
+                    ["fecha_factura", "referencia"]
+                )
+
+                st.dataframe(df_detalle_global, use_container_width=True)
+
+                # Descarga Excel
+                xls_global = to_excel(df_detalle_global)
+                st.download_button(
+                    label="⬇️ Descargar detalle global en Excel",
+                    data=xls_global,
+                    file_name="facturas_pendientes_global.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                )
+
+        # ================================================================
+        # TAB 2: Por cuenta contable (sin cruzar cuentas)
+        # ================================================================
+        with tab_cuenta:
+            st.markdown("### Vista por cuenta contable (sin cruzar cuentas)")
+            st.caption(
+                "Agrupa por **número de cuenta + nombre de cuenta**. "
+                "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan."
+            )
+
+            df_tab2 = filtrar_por_fecha(
+                facturas_cuenta_pend,
+                fecha_desde=fecha_desde,
+                fecha_hasta=fecha_hasta,
+            )
+
+            cuentas_cuenta = (
+                df_tab2["cuenta"].dropna().sort_values().unique().tolist()
+            )
+            cuentas_sel_cuenta = st.multiselect(
+                "Cuenta contable",
+                options=cuentas_cuenta,
+                default=[],
+                key="cuentas_cuenta",
+            )
+            if cuentas_sel_cuenta:
+                df_tab2 = df_tab2[df_tab2["cuenta"].isin(cuentas_sel_cuenta)]
+
+            if df_tab2.empty:
+                st.info("No hay facturas pendientes en este rango de fechas / filtros.")
+            else:
+                # Resumen por cuenta contable
+                st.subheader("📊 Resumen por cuenta contable")
+
+                resumen_cuenta = (
+                    df_tab2.groupby(["account_code", "account_name"])
+                    .agg(
+                        facturas_pendientes=("referencia", "nunique"),
+                        saldo_pendiente_total=("saldo_factura", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values("saldo_pendiente_total", ascending=False)
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric(
+                        "Total de referencias pendientes (sin cruzar cuentas)",
+                        value=int(df_tab2["referencia"].nunique()),
+                    )
+                with c2:
+                    st.metric(
+                        "Saldo pendiente total (sin cruzar cuentas)",
+                        value=f"${df_tab2['saldo_factura'].sum():,.2f}",
+                    )
+
+                st.dataframe(resumen_cuenta, use_container_width=True)
+
+                # Detalle agrupado por cuenta (imitando bloques del Excel)
+                st.subheader("📄 Detalle por cuenta contable")
+
+                df_tab2_sorted = df_tab2.sort_values(
+                    ["account_code", "account_name", "fecha_factura", "referencia"]
+                )
+
+                for (code, name), grp in df_tab2_sorted.groupby(
+                    ["account_code", "account_name"], sort=False
+                ):
+                    total_cuenta = grp["saldo_factura"].sum()
+                    num_facturas = grp["referencia"].nunique()
+
+                    titulo = (
+                        f"{code} - {name}  |  {num_facturas} facturas  |  "
+                        f"saldo pendiente ${total_cuenta:,.2f}"
+                    )
+
+                    with st.expander(titulo, expanded=False):
+                        st.dataframe(
+                            grp[
+                                [
+                                    "referencia",
+                                    "fecha_factura",
+                                    "cargos_total",
+                                    "abonos_total",
+                                    "saldo_factura",
+                                ]
+                            ].sort_values(["fecha_factura", "referencia"]),
+                            use_container_width=True,
+                        )
+
+                # Descarga Excel
+                xls_cuenta = to_excel(
+                    df_tab2_sorted[
                         [
+                            "account_code",
+                            "account_name",
                             "referencia",
                             "fecha_factura",
                             "cargos_total",
                             "abonos_total",
                             "saldo_factura",
                         ]
-                    ].sort_values(["fecha_factura", "referencia"]),
-                    use_container_width=True,
+                    ]
                 )
-
-        # ===== Descarga de detalle =====
-        xls_bytes = to_excel(facturas_detalle)
-        st.download_button(
-            label="⬇️ Descargar detalle en Excel (agrupado por cuenta contable)",
-            data=xls_bytes,
-            file_name="facturas_pendientes_por_cuenta.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-        )
+                st.download_button(
+                    label="⬇️ Descargar detalle por cuenta en Excel",
+                    data=xls_cuenta,
+                    file_name="facturas_pendientes_por_cuenta.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                )
