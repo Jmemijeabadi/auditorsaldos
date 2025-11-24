@@ -10,8 +10,9 @@ st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 st.title("🔍 Autitoria Integracion de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
-    "y el sistema identificará las facturas no pagadas, con dos vistas: "
-    "**por factura (global)** y **por cuenta contable (sin cruzar cuentas)**."
+    "y el sistema identificará las facturas no pagadas, con tres vistas: "
+    "**por factura (global)**, **por cuenta contable (sin cruzar cuentas)** y "
+    "**facturas cruzadas entre cuentas**."
 )
 
 # --------------------------------------------------------------------
@@ -111,7 +112,8 @@ def procesar_movimientos(file) -> pd.DataFrame:
 def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     """
     Construye facturas a nivel global (por referencia), cruzando todas las cuentas.
-    Asigna una 'cuenta principal' por factura (normalmente donde está el cargo).
+    Asigna una 'cuenta principal' por factura (normalmente donde está el cargo) y
+    calcula en cuántas cuentas aparece cada referencia.
     """
     # 1) Agregados globales por referencia
     facturas = (
@@ -148,7 +150,7 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
 
     facturas = facturas.merge(main_account, on="referencia", how="left")
 
-    # 3) Número de cuentas involucradas por referencia
+    # 3) Número de cuentas involucradas por referencia + lista de cuentas
     cuentas_por_factura = (
         movs_valid.groupby("referencia")["account_code"]
         .nunique()
@@ -157,6 +159,19 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     facturas = facturas.merge(cuentas_por_factura, on="referencia", how="left")
     facturas["num_cuentas"] = facturas["num_cuentas"].fillna(0).astype(int)
     facturas["cruza_cuentas"] = facturas["num_cuentas"] > 1
+
+    # Lista de cuentas involucradas (código + nombre) como texto
+    cuentas_involucradas = (
+        movs_valid.assign(
+            cuenta=lambda d: d["account_code"].astype(str)
+            + " - "
+            + d["account_name"].astype(str)
+        )
+        .groupby("referencia")["cuenta"]
+        .apply(lambda x: " | ".join(sorted(set(x))))
+        .reset_index(name="cuentas_involucradas")
+    )
+    facturas = facturas.merge(cuentas_involucradas, on="referencia", how="left")
 
     # 4) Saldo pendiente
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
@@ -266,8 +281,12 @@ else:
         # ----------------------------------------------------------------
         # Vistas en pestañas
         # ----------------------------------------------------------------
-        tab_global, tab_cuenta = st.tabs(
-            ["📑 Por factura (global)", "📂 Por cuenta contable (sin cruzar cuentas)"]
+        tab_global, tab_cuenta, tab_cruzadas = st.tabs(
+            [
+                "📑 Por factura (global)",
+                "📂 Por cuenta contable (sin cruzar cuentas)",
+                "🧩 Facturas cruzadas entre cuentas",
+            ]
         )
 
         # ================================================================
@@ -340,6 +359,7 @@ else:
                     "account_name",
                     "num_cuentas",
                     "cruza_cuentas",
+                    "cuentas_involucradas",
                 ]
 
                 df_detalle_global = df_tab1[cols_detalle_global].sort_values(
@@ -473,3 +493,112 @@ else:
                         "spreadsheetml.sheet"
                     ),
                 )
+
+        # ================================================================
+        # TAB 3: Facturas cruzadas entre cuentas
+        # ================================================================
+        with tab_cruzadas:
+            st.markdown("### Facturas cruzadas entre cuentas")
+            st.caption(
+                "Muestra solo facturas (referencias) que aparecen en **más de una cuenta contable**. "
+                "Indica la cuenta principal y en qué otras cuentas está cruzada."
+            )
+
+            df_tab3_base = filtrar_por_fecha(
+                facturas_global_pend,
+                fecha_desde=fecha_desde,
+                fecha_hasta=fecha_hasta,
+            )
+
+            df_tab3 = df_tab3_base[df_tab3_base["cruza_cuentas"]].copy()
+
+            if df_tab3.empty:
+                st.info(
+                    "No se encontraron facturas cruzadas entre cuentas "
+                    "en este rango de fechas."
+                )
+            else:
+                # Construir columna de cuenta principal (texto)
+                df_tab3["cuenta_principal"] = (
+                    df_tab3["account_code"].astype(str)
+                    + " - "
+                    + df_tab3["account_name"].astype(str)
+                )
+
+                # Calcular otras cuentas (todas menos la principal)
+                def get_otras_cuentas(row):
+                    if pd.isna(row["cuentas_involucradas"]):
+                        return ""
+                    cuentas = [c.strip() for c in str(row["cuentas_involucradas"]).split("|")]
+                    principal = str(row["cuenta_principal"]).strip()
+                    otras = [c for c in cuentas if c != principal]
+                    return " | ".join(otras)
+
+                df_tab3["otras_cuentas"] = df_tab3.apply(get_otras_cuentas, axis=1)
+
+                # Filtro opcional por cuenta principal
+                cuentas_principales = (
+                    df_tab3["cuenta_principal"].dropna().sort_values().unique().tolist()
+                )
+                cuentas_sel_princ = st.multiselect(
+                    "Filtrar por cuenta principal (opcional)",
+                    options=cuentas_principales,
+                    default=[],
+                    key="cuentas_principales_cruzadas",
+                )
+                if cuentas_sel_princ:
+                    df_tab3 = df_tab3[
+                        df_tab3["cuenta_principal"].isin(cuentas_sel_princ)
+                    ]
+
+                if df_tab3.empty:
+                    st.info(
+                        "No hay facturas cruzadas que cumplan con los filtros seleccionados."
+                    )
+                else:
+                    st.subheader("📊 Resumen de facturas cruzadas")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric(
+                            "Facturas cruzadas pendientes",
+                            value=int(df_tab3["referencia"].nunique()),
+                        )
+                    with c2:
+                        st.metric(
+                            "Saldo pendiente total (facturas cruzadas)",
+                            value=f"${df_tab3['saldo_factura'].sum():,.2f}",
+                        )
+
+                    # Detalle de facturas cruzadas
+                    st.subheader("📄 Detalle de facturas cruzadas")
+
+                    cols_cruzadas = [
+                        "referencia",
+                        "fecha_factura",
+                        "cargos_total",
+                        "abonos_total",
+                        "saldo_factura",
+                        "cuenta_principal",
+                        "otras_cuentas",
+                        "num_cuentas",
+                        "cuentas_involucradas",
+                    ]
+
+                    df_detalle_cruzadas = df_tab3[cols_cruzadas].sort_values(
+                        ["fecha_factura", "referencia"]
+                    )
+
+                    st.dataframe(df_detalle_cruzadas, use_container_width=True)
+
+                    # Descarga Excel
+                    xls_cruzadas = to_excel(df_detalle_cruzadas)
+                    st.download_button(
+                        label="⬇️ Descargar detalle de facturas cruzadas en Excel",
+                        data=xls_cruzadas,
+                        file_name="facturas_cruzadas_entre_cuentas.xlsx",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                    )
