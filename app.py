@@ -10,9 +10,9 @@ st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 st.title("🔍 Autitoria Integracion de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
-    "y el sistema identificará las facturas no pagadas, con tres vistas: "
-    "**por factura (global)**, **por cuenta contable (sin cruzar cuentas)** y "
-    "**facturas cruzadas entre cuentas**."
+    "y el sistema identificará las facturas no pagadas, con cuatro vistas: "
+    "**por factura (global)**, **por cuenta contable (sin cruzar cuentas)**, "
+    "**facturas cruzadas pendientes** y **facturas cruzadas pagadas**."
 )
 
 # --------------------------------------------------------------------
@@ -212,7 +212,7 @@ def filtrar_por_fecha(df: pd.DataFrame, fecha_desde: date, fecha_hasta: date) ->
 def to_excel(df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Facturas_pendientes")
+        df.to_excel(writer, index=False, sheet_name="Facturas")
     return output.getvalue()
 
 
@@ -236,24 +236,25 @@ else:
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
-    # Solo facturas con saldo pendiente > 0
+    # Solo facturas con saldo pendiente > 0 (para vistas de pendientes)
     facturas_global_pend = facturas_global[facturas_global["saldo_factura"] > 0].copy()
     facturas_cuenta_pend = facturas_cuenta[facturas_cuenta["saldo_factura"] > 0].copy()
 
-    if facturas_global_pend.empty and facturas_cuenta_pend.empty:
-        st.success("✅ No se encontraron facturas con saldo pendiente en el archivo.")
+    # Si de plano no hay facturas, salimos
+    if facturas_global.empty and facturas_cuenta.empty:
+        st.success("✅ No se encontraron facturas en el archivo.")
     else:
-        # Columna 'cuenta' como en el Excel: código + nombre
+        # Columna 'cuenta' como en el Excel: código + nombre (para las vistas que la necesitan)
         for df in (facturas_global_pend, facturas_cuenta_pend):
             df["cuenta"] = (
                 df["account_code"].astype(str) + " - " + df["account_name"].astype(str)
             )
 
-        # Rango de fechas global para filtros
+        # Rango de fechas global para filtros (usamos todas las facturas, no solo pendientes)
         all_fechas = pd.concat(
             [
-                facturas_global_pend["fecha_factura"],
-                facturas_cuenta_pend["fecha_factura"],
+                facturas_global["fecha_factura"],
+                facturas_cuenta["fecha_factura"],
             ]
         ).dropna()
 
@@ -281,11 +282,17 @@ else:
         # ----------------------------------------------------------------
         # Vistas en pestañas
         # ----------------------------------------------------------------
-        tab_global, tab_cuenta, tab_cruzadas = st.tabs(
+        (
+            tab_global,
+            tab_cuenta,
+            tab_cruzadas,
+            tab_cruzadas_pagadas,
+        ) = st.tabs(
             [
                 "📑 Por factura (global)",
                 "📂 Por cuenta contable (sin cruzar cuentas)",
-                "🧩 Facturas cruzadas entre cuentas",
+                "🧩 Facturas cruzadas pendientes",
+                "✅ Facturas cruzadas pagadas",
             ]
         )
 
@@ -296,7 +303,7 @@ else:
             st.markdown("### Vista por factura (global)")
             st.caption(
                 "Agrupa por **referencia de factura**, cruzando todas las cuentas de clientes. "
-                "Muestra cuánto falta por cobrar por factura a nivel global."
+                "Muestra cuánto falta por cobrar por factura a nivel global (solo pendientes)."
             )
 
             df_tab1 = filtrar_por_fecha(
@@ -305,7 +312,11 @@ else:
 
             # Filtro opcional por cuenta principal
             cuentas_global = (
-                df_tab1["cuenta"].dropna().sort_values().unique().tolist()
+                df_tab1.get("cuenta", pd.Series(dtype=str))
+                .dropna()
+                .sort_values()
+                .unique()
+                .tolist()
             )
             cuentas_sel_global = st.multiselect(
                 "Cuenta principal (opcional)",
@@ -397,7 +408,11 @@ else:
             )
 
             cuentas_cuenta = (
-                df_tab2["cuenta"].dropna().sort_values().unique().tolist()
+                df_tab2.get("cuenta", pd.Series(dtype=str))
+                .dropna()
+                .sort_values()
+                .unique()
+                .tolist()
             )
             cuentas_sel_cuenta = st.multiselect(
                 "Cuenta contable",
@@ -495,13 +510,13 @@ else:
                 )
 
         # ================================================================
-        # TAB 3: Facturas cruzadas entre cuentas
+        # TAB 3: Facturas cruzadas entre cuentas pendientes
         # ================================================================
         with tab_cruzadas:
-            st.markdown("### Facturas cruzadas entre cuentas")
+            st.markdown("### Facturas cruzadas entre cuentas (pendientes)")
             st.caption(
-                "Muestra solo facturas (referencias) que aparecen en **más de una cuenta contable**. "
-                "Indica la cuenta principal y en qué otras cuentas está cruzada."
+                "Muestra solo facturas (referencias) que aparecen en **más de una cuenta contable** "
+                "y que todavía tienen saldo pendiente."
             )
 
             df_tab3_base = filtrar_por_fecha(
@@ -514,7 +529,7 @@ else:
 
             if df_tab3.empty:
                 st.info(
-                    "No se encontraron facturas cruzadas entre cuentas "
+                    "No se encontraron facturas cruzadas pendientes "
                     "en este rango de fechas."
                 )
             else:
@@ -544,7 +559,7 @@ else:
                     "Filtrar por cuenta principal (opcional)",
                     options=cuentas_principales,
                     default=[],
-                    key="cuentas_principales_cruzadas",
+                    key="cuentas_principales_cruzadas_pend",
                 )
                 if cuentas_sel_princ:
                     df_tab3 = df_tab3[
@@ -553,10 +568,10 @@ else:
 
                 if df_tab3.empty:
                     st.info(
-                        "No hay facturas cruzadas que cumplan con los filtros seleccionados."
+                        "No hay facturas cruzadas pendientes que cumplan con los filtros seleccionados."
                     )
                 else:
-                    st.subheader("📊 Resumen de facturas cruzadas")
+                    st.subheader("📊 Resumen de facturas cruzadas pendientes")
 
                     c1, c2 = st.columns(2)
                     with c1:
@@ -571,7 +586,7 @@ else:
                         )
 
                     # Detalle de facturas cruzadas
-                    st.subheader("📄 Detalle de facturas cruzadas")
+                    st.subheader("📄 Detalle de facturas cruzadas pendientes")
 
                     cols_cruzadas = [
                         "referencia",
@@ -594,9 +609,121 @@ else:
                     # Descarga Excel
                     xls_cruzadas = to_excel(df_detalle_cruzadas)
                     st.download_button(
-                        label="⬇️ Descargar detalle de facturas cruzadas en Excel",
+                        label="⬇️ Descargar detalle de facturas cruzadas pendientes en Excel",
                         data=xls_cruzadas,
-                        file_name="facturas_cruzadas_entre_cuentas.xlsx",
+                        file_name="facturas_cruzadas_pendientes.xlsx",
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                    )
+
+        # ================================================================
+        # TAB 4: Facturas cruzadas entre cuentas pagadas
+        # ================================================================
+        with tab_cruzadas_pagadas:
+            st.markdown("### Facturas cruzadas entre cuentas (pagadas)")
+            st.caption(
+                "Muestra facturas cruzadas entre cuentas cuya integración de cargos y abonos "
+                "da como resultado **saldo 0** (consideradas pagadas)."
+            )
+
+            df_tab4_base = filtrar_por_fecha(
+                facturas_global,
+                fecha_desde=fecha_desde,
+                fecha_hasta=fecha_hasta,
+            )
+
+            # Definimos 'pagadas' como saldo_factura == 0; si quieres incluir saldos a favor, cambia a <= 0
+            df_tab4 = df_tab4_base[
+                (df_tab4_base["cruza_cuentas"]) & (df_tab4_base["saldo_factura"] == 0)
+            ].copy()
+
+            if df_tab4.empty:
+                st.info(
+                    "No se encontraron facturas cruzadas pagadas "
+                    "en este rango de fechas."
+                )
+            else:
+                # Cuenta principal (texto)
+                df_tab4["cuenta_principal"] = (
+                    df_tab4["account_code"].astype(str)
+                    + " - "
+                    + df_tab4["account_name"].astype(str)
+                )
+
+                # Otras cuentas
+                def get_otras_cuentas_pag(row):
+                    if pd.isna(row["cuentas_involucradas"]):
+                        return ""
+                    cuentas = [c.strip() for c in str(row["cuentas_involucradas"]).split("|")]
+                    principal = str(row["cuenta_principal"]).strip()
+                    otras = [c for c in cuentas if c != principal]
+                    return " | ".join(otras)
+
+                df_tab4["otras_cuentas"] = df_tab4.apply(get_otras_cuentas_pag, axis=1)
+
+                # Filtro opcional por cuenta principal
+                cuentas_principales_pag = (
+                    df_tab4["cuenta_principal"].dropna().sort_values().unique().tolist()
+                )
+                cuentas_sel_princ_pag = st.multiselect(
+                    "Filtrar por cuenta principal (opcional)",
+                    options=cuentas_principales_pag,
+                    default=[],
+                    key="cuentas_principales_cruzadas_pag",
+                )
+                if cuentas_sel_princ_pag:
+                    df_tab4 = df_tab4[
+                        df_tab4["cuenta_principal"].isin(cuentas_sel_princ_pag)
+                    ]
+
+                if df_tab4.empty:
+                    st.info(
+                        "No hay facturas cruzadas pagadas que cumplan con los filtros seleccionados."
+                    )
+                else:
+                    st.subheader("📊 Resumen de facturas cruzadas pagadas")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric(
+                            "Facturas cruzadas pagadas",
+                            value=int(df_tab4["referencia"].nunique()),
+                        )
+                    with c2:
+                        st.metric(
+                            "Saldo total (debería ser 0)",
+                            value=f"${df_tab4['saldo_factura'].sum():,.2f}",
+                        )
+
+                    # Detalle
+                    st.subheader("📄 Detalle de facturas cruzadas pagadas")
+
+                    cols_cruzadas_pag = [
+                        "referencia",
+                        "fecha_factura",
+                        "cargos_total",
+                        "abonos_total",
+                        "saldo_factura",
+                        "cuenta_principal",
+                        "otras_cuentas",
+                        "num_cuentas",
+                        "cuentas_involucradas",
+                    ]
+
+                    df_detalle_cruzadas_pag = df_tab4[cols_cruzadas_pag].sort_values(
+                        ["fecha_factura", "referencia"]
+                    )
+
+                    st.dataframe(df_detalle_cruzadas_pag, use_container_width=True)
+
+                    # Descarga
+                    xls_cruzadas_pag = to_excel(df_detalle_cruzadas_pag)
+                    st.download_button(
+                        label="⬇️ Descargar detalle de facturas cruzadas pagadas en Excel",
+                        data=xls_cruzadas_pag,
+                        file_name="facturas_cruzadas_pagadas.xlsx",
                         mime=(
                             "application/vnd.openxmlformats-officedocument."
                             "spreadsheetml.sheet"
