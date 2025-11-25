@@ -58,6 +58,7 @@ def procesar_movimientos(file):
     Lee el Excel de CONTPAQ y regresa:
       - movs_valid: DataFrame de movimientos con referencia (y cuenta asignada).
       - resumen_auxiliar: dict con totales globales (cargos, abonos, saldo final auxiliar, etc.)
+      - totales_cuentas_aux: DataFrame con totales por cuenta (Total: del auxiliar).
     """
     # Leer tal cual, sin encabezados
     raw = pd.read_excel(file, header=None)
@@ -143,7 +144,39 @@ def procesar_movimientos(file):
         else None,
     }
 
-    return movs_valid, resumen_auxiliar
+    # ----------------------------------------------------------------
+    # Totales por cuenta (fila 'Total:' en la columna 4)
+    # ----------------------------------------------------------------
+    tot_rows = df[df[4].astype(str).str.strip() == "Total:"].copy()
+    for c in [5, 6, 7]:
+        tot_rows[c] = pd.to_numeric(tot_rows[c], errors="coerce")
+
+    totales_cuentas_aux = (
+        tot_rows.rename(
+            columns={
+                5: "cargos_total_cuenta_aux",
+                6: "abonos_total_cuenta_aux",
+                7: "saldo_final_cuenta_aux",
+            }
+        )[
+            [
+                "account_code",
+                "account_name",
+                "cargos_total_cuenta_aux",
+                "abonos_total_cuenta_aux",
+                "saldo_final_cuenta_aux",
+            ]
+        ]
+        .groupby(["account_code", "account_name"])
+        .agg(
+            cargos_total_cuenta_aux=("cargos_total_cuenta_aux", "sum"),
+            abonos_total_cuenta_aux=("abonos_total_cuenta_aux", "sum"),
+            saldo_final_cuenta_aux=("saldo_final_cuenta_aux", "sum"),
+        )
+        .reset_index()
+    )
+
+    return movs_valid, resumen_auxiliar, totales_cuentas_aux
 
 
 @st.cache_data
@@ -270,11 +303,11 @@ if uploaded_file is None:
     )
 else:
     with st.spinner("Procesando archivo..."):
-        movs_valid, resumen_aux = procesar_movimientos(uploaded_file)
+        movs_valid, resumen_aux, totales_cuentas_aux = procesar_movimientos(uploaded_file)
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
-    # Solo facturas con saldo pendiente > 0 (para vistas de pendientes)
+    # Solo facturas con saldo pendiente > 0 (para algunas vistas)
     facturas_global_pend = facturas_global[facturas_global["saldo_factura"] > 0].copy()
     facturas_cuenta_pend = facturas_cuenta[facturas_cuenta["saldo_factura"] > 0].copy()
 
@@ -290,12 +323,12 @@ else:
         colg1, colg2, colg3, colg4 = st.columns(4)
         with colg1:
             st.metric(
-                "Cargos del periodo (movimientos)",
+                "Cargos del periodo (movimientos con referencia)",
                 value=f"${resumen_aux['total_cargos_movs']:,.2f}",
             )
         with colg2:
             st.metric(
-                "Abonos del periodo (movimientos)",
+                "Abonos del periodo (movimientos con referencia)",
                 value=f"${resumen_aux['total_abonos_movs']:,.2f}",
             )
         with colg3:
@@ -319,13 +352,7 @@ else:
             st.caption(
                 f"Saldo inicial implícito según auxiliar: "
                 f"${resumen_aux['saldo_inicial_implicito']:,.2f} "
-                f"(Saldo final auxiliar - saldo neto de movimientos)."
-            )
-
-        # Columna 'cuenta' como en el Excel: código + nombre (para las vistas que la necesitan)
-        for df in (facturas_global_pend, facturas_cuenta_pend):
-            df["cuenta"] = (
-                df["account_code"].astype(str) + " - " + df["account_name"].astype(str)
+                f"(Saldo final auxiliar - saldo neto de movimientos con referencia)."
             )
 
         # Rango de fechas global para filtros (usamos todas las facturas, no solo pendientes)
@@ -381,13 +408,15 @@ else:
             st.markdown("### Vista por factura (global)")
             st.caption(
                 "Agrupa por **referencia de factura**, cruzando todas las cuentas de clientes. "
-                "Muestra cuánto falta por cobrar por factura a nivel global (solo pendientes)."
+                "Muestra cuánto falta por cobrar por factura a nivel global."
             )
 
-            # Para métricas más completas, filtramos también el universo completo (positivas y negativas)
+            # Filtramos el universo completo de referencias en el rango
             facturas_global_filtradas = filtrar_por_fecha(
                 facturas_global, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
             )
+
+            # Pendientes (solo saldo > 0) dentro del rango
             df_tab1 = facturas_global_filtradas[
                 facturas_global_filtradas["saldo_factura"] > 0
             ].copy()
@@ -513,22 +542,26 @@ else:
             st.markdown("### Vista por cuenta contable (sin cruzar cuentas)")
             st.caption(
                 "Agrupa por **número de cuenta + nombre de cuenta**. "
-                "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan."
+                "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan. "
+                "Se muestran saldos positivos, negativos y netos por referencia, y el saldo final del auxiliar."
             )
 
-            df_tab2 = filtrar_por_fecha(
-                facturas_cuenta_pend,
+            # Usamos TODO el universo de facturas por cuenta (positivas y negativas), filtrado por fecha
+            df_cuenta_all = filtrar_por_fecha(
+                facturas_cuenta,
                 fecha_desde=fecha_desde,
                 fecha_hasta=fecha_hasta,
             )
 
-            df_tab2["cuenta"] = (
-                df_tab2["account_code"].astype(str)
+            # Columna de texto de cuenta
+            df_cuenta_all["cuenta"] = (
+                df_cuenta_all["account_code"].astype(str)
                 + " - "
-                + df_tab2["account_name"].astype(str)
+                + df_cuenta_all["account_name"].astype(str)
             )
+
             cuentas_cuenta = (
-                df_tab2.get("cuenta", pd.Series(dtype=str))
+                df_cuenta_all["cuenta"]
                 .dropna()
                 .sort_values()
                 .unique()
@@ -541,53 +574,105 @@ else:
                 key="cuentas_cuenta",
             )
             if cuentas_sel_cuenta:
-                df_tab2 = df_tab2[df_tab2["cuenta"].isin(cuentas_sel_cuenta)]
+                df_cuenta_all = df_cuenta_all[
+                    df_cuenta_all["cuenta"].isin(cuentas_sel_cuenta)
+                ]
 
-            if df_tab2.empty:
-                st.info("No hay facturas pendientes en este rango de fechas / filtros.")
+            if df_cuenta_all.empty:
+                st.info("No hay facturas en este rango de fechas / filtros.")
             else:
-                # Resumen por cuenta contable
-                st.subheader("📊 Resumen por cuenta contable")
-
+                # Resumen por cuenta: positivos, negativos, neto
                 resumen_cuenta = (
-                    df_tab2.groupby(["account_code", "account_name"])
+                    df_cuenta_all.groupby(["account_code", "account_name"])
                     .agg(
-                        facturas_pendientes=("referencia", "nunique"),
-                        saldo_pendiente_total=("saldo_factura", "sum"),
+                        facturas_positivas=("saldo_factura", lambda s: int((s > 0).sum())),
+                        saldo_positivas=("saldo_factura", lambda s: float(s[s > 0].sum())),
+                        referencias_negativas=("saldo_factura", lambda s: int((s < 0).sum())),
+                        saldo_negativas=("saldo_factura", lambda s: float(s[s < 0].sum())),
+                        saldo_neto=("saldo_factura", "sum"),
                     )
                     .reset_index()
-                    .sort_values("saldo_pendiente_total", ascending=False)
                 )
 
-                c1, c2 = st.columns(2)
+                # Unimos totales del auxiliar por cuenta (cargos, abonos, saldo final)
+                resumen_cuenta = resumen_cuenta.merge(
+                    totales_cuentas_aux,
+                    on=["account_code", "account_name"],
+                    how="left",
+                )
+
+                resumen_cuenta["diferencia_vs_auxiliar"] = (
+                    resumen_cuenta["saldo_final_cuenta_aux"] - resumen_cuenta["saldo_neto"]
+                )
+
+                # Métricas globales (en el rango de fechas actual)
+                saldo_pos_total = resumen_cuenta["saldo_positivas"].sum()
+                saldo_neg_total = resumen_cuenta["saldo_negativas"].sum()
+                saldo_neto_total = resumen_cuenta["saldo_neto"].sum()
+
+                c1, c2, c3 = st.columns(3)
                 with c1:
                     st.metric(
-                        "Total de referencias pendientes (sin cruzar cuentas)",
-                        value=int(df_tab2["referencia"].nunique()),
+                        "Saldo facturas positivas (en rango)",
+                        value=f"${saldo_pos_total:,.2f}",
                     )
                 with c2:
                     st.metric(
-                        "Saldo pendiente total (sin cruzar cuentas)",
-                        value=f"${df_tab2['saldo_factura'].sum():,.2f}",
+                        "Saldo referencias negativas (en rango)",
+                        value=f"${saldo_neg_total:,.2f}",
+                    )
+                with c3:
+                    st.metric(
+                        "Saldo neto por referencia (en rango)",
+                        value=f"${saldo_neto_total:,.2f}",
                     )
 
-                st.dataframe(resumen_cuenta, use_container_width=True)
+                st.caption(
+                    "Los saldos del auxiliar (cargos, abonos y saldo final por cuenta) "
+                    "corresponden al periodo completo del reporte exportado. "
+                    "El saldo neto por referencia corresponde solo al rango de fechas filtrado."
+                )
 
-                # Detalle agrupado por cuenta (imitando bloques del Excel)
-                st.subheader("📄 Detalle por cuenta contable")
+                # Tabla de resumen por cuenta
+                st.subheader("📊 Resumen por cuenta contable")
 
-                df_tab2_sorted = df_tab2.sort_values(
+                cols_resumen = [
+                    "account_code",
+                    "account_name",
+                    "facturas_positivas",
+                    "saldo_positivas",
+                    "referencias_negativas",
+                    "saldo_negativas",
+                    "saldo_neto",
+                    "cargos_total_cuenta_aux",
+                    "abonos_total_cuenta_aux",
+                    "saldo_final_cuenta_aux",
+                    "diferencia_vs_auxiliar",
+                ]
+
+                st.dataframe(
+                    resumen_cuenta[cols_resumen].sort_values(
+                        "saldo_neto", ascending=False
+                    ),
+                    use_container_width=True,
+                )
+
+                # Detalle de facturas pendientes (solo saldo > 0) por cuenta
+                st.subheader("📄 Detalle de facturas pendientes por cuenta contable")
+
+                df_pend_cuenta = df_cuenta_all[df_cuenta_all["saldo_factura"] > 0].copy()
+                df_pend_cuenta = df_pend_cuenta.sort_values(
                     ["account_code", "account_name", "fecha_factura", "referencia"]
                 )
 
-                for (code, name), grp in df_tab2_sorted.groupby(
+                for (code, name), grp in df_pend_cuenta.groupby(
                     ["account_code", "account_name"], sort=False
                 ):
                     total_cuenta = grp["saldo_factura"].sum()
                     num_facturas = grp["referencia"].nunique()
 
                     titulo = (
-                        f"{code} - {name}  |  {num_facturas} facturas  |  "
+                        f"{code} - {name}  |  {num_facturas} facturas con saldo positivo  |  "
                         f"saldo pendiente ${total_cuenta:,.2f}"
                     )
 
@@ -605,9 +690,9 @@ else:
                             use_container_width=True,
                         )
 
-                # Descarga Excel
+                # Descarga Excel (detalle por cuenta, solo pendientes)
                 xls_cuenta = to_excel(
-                    df_tab2_sorted[
+                    df_pend_cuenta[
                         [
                             "account_code",
                             "account_name",
@@ -620,7 +705,7 @@ else:
                     ]
                 )
                 st.download_button(
-                    label="⬇️ Descargar detalle por cuenta en Excel",
+                    label="⬇️ Descargar detalle por cuenta en Excel (solo pendientes)",
                     data=xls_cuenta,
                     file_name="facturas_pendientes_por_cuenta.xlsx",
                     mime=(
