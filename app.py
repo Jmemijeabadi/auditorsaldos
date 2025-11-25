@@ -244,7 +244,7 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     )
     facturas = facturas.merge(cuentas_involucradas, on="referencia", how="left")
 
-    # 4) Saldo pendiente por referencia
+    # 4) Saldo pendiente por referencia (neto C-A)
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
 
     return facturas
@@ -316,27 +316,17 @@ else:
         st.success("✅ No se encontraron facturas en el archivo.")
     else:
         # ------------------------------------------------------------
-        # RESUMEN GLOBAL VS AUXILIAR (cálculo real del reporte)
+        # RESUMEN GLOBAL VS AUXILIAR (solo netos)
         # ------------------------------------------------------------
         st.subheader("📊 Resumen global vs auxiliar")
 
-        colg1, colg2, colg3, colg4 = st.columns(4)
+        colg1, colg2, colg3 = st.columns(3)
         with colg1:
-            st.metric(
-                "Cargos del periodo (movimientos con referencia)",
-                value=f"${resumen_aux['total_cargos_movs']:,.2f}",
-            )
-        with colg2:
-            st.metric(
-                "Abonos del periodo (movimientos con referencia)",
-                value=f"${resumen_aux['total_abonos_movs']:,.2f}",
-            )
-        with colg3:
             st.metric(
                 "Saldo neto movimientos (C-A)",
                 value=f"${resumen_aux['saldo_neto_movs']:,.2f}",
             )
-        with colg4:
+        with colg2:
             if resumen_aux.get("saldo_final_aux") is not None:
                 st.metric(
                     "Saldo final cartera (auxiliar - Total Clientes)",
@@ -345,6 +335,23 @@ else:
             else:
                 st.metric(
                     "Saldo final cartera (auxiliar)",
+                    value="N/D",
+                )
+        with colg3:
+            if (
+                resumen_aux.get("saldo_final_aux") is not None
+                and resumen_aux.get("saldo_neto_movs") is not None
+            ):
+                diferencia_global = (
+                    resumen_aux["saldo_final_aux"] - resumen_aux["saldo_neto_movs"]
+                )
+                st.metric(
+                    "Diferencia (auxiliar - neto movimientos)",
+                    value=f"${diferencia_global:,.2f}",
+                )
+            else:
+                st.metric(
+                    "Diferencia (auxiliar - neto movimientos)",
                     value="N/D",
                 )
 
@@ -408,7 +415,7 @@ else:
             st.markdown("### Vista por factura (global)")
             st.caption(
                 "Agrupa por **referencia de factura**, cruzando todas las cuentas de clientes. "
-                "Muestra cuánto falta por cobrar por factura a nivel global y permite conciliar por cuenta."
+                "Muestra el **saldo neto** por factura a nivel global y permite conciliar por cuenta."
             )
 
             # Filtramos el universo completo de referencias en el rango de fechas
@@ -449,29 +456,13 @@ else:
             if subset_all.empty:
                 st.info("No hay facturas en este rango de fechas / filtros.")
             else:
-                # Métricas de saldos por referencia (positivas y negativas) dentro del filtro actual
-                saldo_positivas = subset_all.loc[
-                    subset_all["saldo_factura"] > 0, "saldo_factura"
-                ].sum()
-                saldo_negativas = subset_all.loc[
-                    subset_all["saldo_factura"] < 0, "saldo_factura"
-                ].sum()
-                saldo_neto_referencias = saldo_positivas + saldo_negativas
+                # Saldos netos por referencia dentro del filtro actual
+                saldo_neto_referencias = subset_all["saldo_factura"].sum()
 
                 st.subheader("📊 Resumen por referencia (según filtros actuales)")
 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric(
-                        "Saldo facturas con saldo positivo",
-                        value=f"${saldo_positivas:,.2f}",
-                    )
-                with c2:
-                    st.metric(
-                        "Saldo referencias con saldo negativo",
-                        value=f"${saldo_negativas:,.2f}",
-                    )
-                with c3:
+                col_resumen = st.columns(1)[0]
+                with col_resumen:
                     st.metric(
                         "Saldo neto por referencia (C-A)",
                         value=f"${saldo_neto_referencias:,.2f}",
@@ -597,7 +588,7 @@ else:
             st.caption(
                 "Agrupa por **número de cuenta + nombre de cuenta**. "
                 "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan. "
-                "Se muestran saldos positivos, negativos y netos por referencia, y el saldo final del auxiliar."
+                "Se muestran solo **saldos netos** por referencia y el saldo final del auxiliar."
             )
 
             # Usamos TODO el universo de facturas por cuenta (positivas y negativas), filtrado por fecha
@@ -635,7 +626,7 @@ else:
             if df_cuenta_all.empty:
                 st.info("No hay facturas en este rango de fechas / filtros.")
             else:
-                # Resumen por cuenta: positivos, negativos, neto
+                # Resumen por cuenta: usamos saldo neto; positivas/negativas solo internas
                 resumen_cuenta = (
                     df_cuenta_all.groupby(["account_code", "account_name"])
                     .agg(
@@ -659,23 +650,11 @@ else:
                     resumen_cuenta["saldo_final_cuenta_aux"] - resumen_cuenta["saldo_neto"]
                 )
 
-                # Métricas globales (en el rango de fechas actual)
-                saldo_pos_total = resumen_cuenta["saldo_positivas"].sum()
-                saldo_neg_total = resumen_cuenta["saldo_negativas"].sum()
+                # Métrica global (en el rango de fechas actual): solo neto
                 saldo_neto_total = resumen_cuenta["saldo_neto"].sum()
 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric(
-                        "Saldo facturas positivas (en rango)",
-                        value=f"${saldo_pos_total:,.2f}",
-                    )
-                with c2:
-                    st.metric(
-                        "Saldo referencias negativas (en rango)",
-                        value=f"${saldo_neg_total:,.2f}",
-                    )
-                with c3:
+                col_net = st.columns(1)[0]
+                with col_net:
                     st.metric(
                         "Saldo neto por referencia (en rango)",
                         value=f"${saldo_neto_total:,.2f}",
@@ -687,16 +666,14 @@ else:
                     "El saldo neto por referencia corresponde solo al rango de fechas filtrado."
                 )
 
-                # Tabla de resumen por cuenta
+                # Tabla de resumen por cuenta (solo netos + auxiliar)
                 st.subheader("📊 Resumen por cuenta contable")
 
                 cols_resumen = [
                     "account_code",
                     "account_name",
                     "facturas_positivas",
-                    "saldo_positivas",
                     "referencias_negativas",
-                    "saldo_negativas",
                     "saldo_neto",
                     "cargos_total_cuenta_aux",
                     "abonos_total_cuenta_aux",
@@ -775,7 +752,7 @@ else:
             st.markdown("### Facturas cruzadas entre cuentas (pendientes)")
             st.caption(
                 "Muestra solo facturas (referencias) que aparecen en **más de una cuenta contable** "
-                "y que todavía tienen saldo pendiente."
+                "y que todavía tienen saldo pendiente (saldo neto > 0)."
             )
 
             df_tab3_base = filtrar_por_fecha(
@@ -884,7 +861,7 @@ else:
             st.markdown("### Facturas cruzadas entre cuentas (pagadas)")
             st.caption(
                 "Muestra facturas cruzadas entre cuentas cuya integración de cargos y abonos "
-                "da como resultado **saldo 0** (consideradas pagadas)."
+                "da como resultado **saldo neto 0** (consideradas pagadas)."
             )
 
             df_tab4_base = filtrar_por_fecha(
