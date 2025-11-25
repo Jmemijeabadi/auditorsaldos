@@ -7,7 +7,7 @@ from datetime import date
 
 st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 
-st.title("🔍 Autitoria Integracion de Saldos")
+st.title("🔍 Auditoria Integracion de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
     "y el sistema identificará las facturas no pagadas, con cuatro vistas: "
