@@ -17,6 +17,122 @@ st.write(
 )
 
 # --------------------------------------------------------------------
+# Cuadro de ayuda para auditoría
+# --------------------------------------------------------------------
+with st.expander("ℹ️ Cómo leer este reporte (ayuda para auditoría)", expanded=False):
+    st.markdown(
+        """
+**1. Alcance del análisis**
+
+- El archivo de entrada es el reporte de **Movimientos, Auxiliares del Catálogo** exportado desde CONTPAQ i.
+- El sistema utiliza exclusivamente las filas de movimientos que:
+  - Tienen una **fecha válida** (columna 0, formato `dd/Mon/aaaa`), y  
+  - Tienen un dato en la columna **Referencia** (número de factura).
+- Los movimientos **sin referencia** (p.ej. ajustes, cargos/abonos sin folio) no se incluyen en el análisis por factura, pero sí están implícitamente contenidos en el **saldo final del auxiliar** contra el que se concilia.
+
+---
+
+**2. Cómo se calculan los saldos netos**
+
+Para cada referencia de factura:
+
+- Se suman todos los **cargos** asociados a esa referencia.
+- Se suman todos los **abonos** asociados a esa misma referencia.
+- Se calcula el **saldo neto** como:
+
+> `saldo_factura = cargos_total – abonos_total`
+
+Interpretación:
+
+- `saldo_factura > 0`  → factura con saldo **pendiente de cobro**.  
+- `saldo_factura = 0`  → factura **totalmente pagada / saldada**.  
+- `saldo_factura < 0`  → saldo **a favor del cliente** (créditos, notas de crédito mayores al cargo, etc.).
+
+Este cálculo se hace:
+
+- A nivel **global por referencia** (cruzando todas las cuentas de clientes).
+- A nivel **cuenta contable + referencia** (misma factura, separada por cuenta contable).
+
+---
+
+**3. Resumen global vs auxiliar**
+
+En la parte superior se muestra un bloque de **conciliación**:
+
+- **Saldo neto movimientos (C-A):**  
+  Suma de todos los `saldo_factura` de las referencias encontradas en el periodo (cargos con referencia menos abonos con referencia).
+
+- **Saldo final cartera (auxiliar – Total Clientes):**  
+  Es el saldo final que aparece en la fila **“Total Clientes :”** del auxiliar (CONTPAQ).
+
+- **Diferencia (auxiliar – neto movimientos):**  
+  Diferencia entre el saldo final del auxiliar y el saldo neto de movimientos con referencia.  
+  Esta diferencia, en términos contables, refleja principalmente:
+  - El **saldo inicial** de la cartera al inicio del periodo, y
+  - Movimientos que **no traen referencia** (p.ej. ajustes, reclasificaciones, etc.) o fuera del rango de fechas filtrado.
+
+---
+
+**4. Pestaña “📑 Por factura (global)”**
+
+- Agrupa por **referencia de factura**, sin importar en qué cuenta contable se haya registrado.
+- Para cada factura muestra un único `saldo_factura` **neto** (C-A) a nivel grupo.
+- La “cuenta” que se visualiza es la **cuenta principal** donde se identificó el cargo de la factura.
+- Esta vista responde la pregunta:  
+  > “¿Cuál es el saldo neto de cada factura, considerando todas las cuentas donde han pasado sus cargos y abonos?”
+
+Si filtras por alguna cuenta específica:
+
+- El sistema recalcula el saldo neto solo con las facturas cuya **cuenta principal** coincide con el filtro.
+- Adicionalmente, compara el saldo neto de esas facturas contra el **saldo final de esa(s) cuenta(s)** en el auxiliar.
+
+---
+
+**5. Pestaña “📂 Por cuenta contable (sin cruzar cuentas)”**
+
+- Agrupa por **número de cuenta + nombre de cuenta + referencia**.
+- La misma factura puede aparecer en **varias cuentas**, pero aquí se muestra **separada por cuenta**, sin cruzar saldos entre ellas.
+- Se presenta:
+  - Número de facturas con saldo positivo.
+  - Número de referencias con saldo negativo.
+  - **Saldo neto** por cuenta (suma de todos los saldos netos de sus referencias).
+  - Saldos del auxiliar por cuenta (`Total:` del reporte).
+  - Diferencia entre saldo neto por referencia y saldo final del auxiliar, útil para identificar:
+    - Saldos iniciales de la cuenta.
+    - Movimientos sin referencia.
+    - Posibles diferencias por periodo o por clasificación.
+
+Esta vista responde la pregunta:
+
+> “¿Cuál es el saldo neto por referencia dentro de cada cuenta contable, y cómo se reconcilia contra el saldo final del auxiliar de esa cuenta?”
+
+---
+
+**6. Pestañas de facturas cruzadas entre cuentas**
+
+- **🧩 Facturas cruzadas pendientes:**  
+  Muestra solo las referencias que aparecen en **más de una cuenta contable** y cuyo `saldo_factura > 0`.  
+  Útil para detectar:
+  - Facturas que se originaron en una cuenta y cuyos abonos se han registrado en otras cuentas.
+  - Posibles errores de aplicación de pagos entre clientes.
+
+- **✅ Facturas cruzadas pagadas:**  
+  Mismas referencias cruzadas, pero cuyo `saldo_factura = 0`.  
+  Es una evidencia de que, aunque la factura se haya movido entre cuentas (reclasificaciones, aplicaciones cruzadas), a nivel global está **totalmente saldada**.
+
+---
+
+**7. Consideraciones de auditoría**
+
+- Todos los montos visibles en las tablas de detalle se muestran como **importes netos**, ya integrando cargos y abonos por referencia.
+- El **auxiliar** sigue siendo el documento rector del saldo final; la app sirve como herramienta de:
+  - Conciliación analítica por factura y por cuenta.
+  - Identificación de facturas pendientes.
+  - Detección de facturas cruzadas entre cuentas y posibles errores de aplicación.
+        """
+    )
+
+# --------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------
 
