@@ -546,14 +546,12 @@ else:
 
                     st.dataframe(resumen_global, use_container_width=True)
 
-                    # Detalle por factura
+                    # Detalle por factura (solo netos)
                     st.subheader("📄 Detalle de facturas (global)")
 
                     cols_detalle_global = [
                         "referencia",
                         "fecha_factura",
-                        "cargos_total",
-                        "abonos_total",
                         "saldo_factura",
                         "account_code",
                         "account_name",
@@ -713,15 +711,13 @@ else:
                                 [
                                     "referencia",
                                     "fecha_factura",
-                                    "cargos_total",
-                                    "abonos_total",
                                     "saldo_factura",
                                 ]
                             ].sort_values(["fecha_factura", "referencia"]),
                             use_container_width=True,
                         )
 
-                # Descarga Excel (detalle por cuenta, solo pendientes)
+                # Descarga Excel (detalle por cuenta, solo pendientes, solo netos)
                 xls_cuenta = to_excel(
                     df_pend_cuenta[
                         [
@@ -729,14 +725,12 @@ else:
                             "account_name",
                             "referencia",
                             "fecha_factura",
-                            "cargos_total",
-                            "abonos_total",
                             "saldo_factura",
                         ]
                     ]
                 )
                 st.download_button(
-                    label="⬇️ Descargar detalle por cuenta en Excel (solo pendientes)",
+                    label="⬇️ Descargar detalle por cuenta en Excel (solo pendientes, netos)",
                     data=xls_cuenta,
                     file_name="facturas_pendientes_por_cuenta.xlsx",
                     mime=(
@@ -821,14 +815,12 @@ else:
                             value=f"${df_tab3['saldo_factura'].sum():,.2f}",
                         )
 
-                    # Detalle de facturas cruzadas
+                    # Detalle de facturas cruzadas (solo netos)
                     st.subheader("📄 Detalle de facturas cruzadas pendientes")
 
                     cols_cruzadas = [
                         "referencia",
                         "fecha_factura",
-                        "cargos_total",
-                        "abonos_total",
                         "saldo_factura",
                         "cuenta_principal",
                         "otras_cuentas",
@@ -933,14 +925,12 @@ else:
                             value=f"${df_tab4['saldo_factura'].sum():,.2f}",
                         )
 
-                    # Detalle
+                    # Detalle (solo netos)
                     st.subheader("📄 Detalle de facturas cruzadas pagadas")
 
                     cols_cruzadas_pag = [
                         "referencia",
                         "fecha_factura",
-                        "cargos_total",
-                        "abonos_total",
                         "saldo_factura",
                         "cuenta_principal",
                         "otras_cuentas",
