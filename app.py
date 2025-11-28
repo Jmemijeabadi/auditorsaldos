@@ -14,7 +14,7 @@ st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 st.title("🔍 Auditoría Integración de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i. "
-    "La app calcula salos **netos** por factura y por cuenta, y los compara contra el auxiliar."
+    "La app calcula saldos **netos** por factura y por cuenta, y los compara contra el auxiliar."
 )
 
 # --------------------------------------------------------------------
@@ -84,25 +84,13 @@ Si `solo_saldo_inicial = True`, la lectura es:
 
 ---
 
-**6. Pestaña “Referencias cruzadas entre cuentas”**
-
-- Muestra referencias (números de factura) que aparecen en **más de una cuenta contable** en el periodo.
-- Indica:
-  - Cuántas cuentas están involucradas.
-  - El **saldo global** de la referencia (sumando todas las cuentas).
-  - Si el saldo global está prácticamente en cero (`es_saldo_global_cero = True`), pero sigue generando saldos distintos por cuenta.
-- Útil para detectar **pagos aplicados en cuentas equivocadas** o necesidad de reclasificación contable.
-
----
-
-**7. Importante**
+**6. Importante**
 
 - Los **saldos del auxiliar** siempre mandan como referencia final.
 - La app es una herramienta de **análisis**:
   - Para ver facturas pendientes.
   - Para conciliar saldo por cuenta vs auxiliar.
   - Para detectar cuentas con “solo saldo inicial / ajustes” (`solo_saldo_inicial = True`).
-  - Para identificar referencias cruzadas entre cuentas y armar listas de trabajo para contabilidad.
         """
     )
 
@@ -291,7 +279,7 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
 
     facturas = facturas.merge(main_account, on="referencia", how="left")
 
-    # Suma neta por referencia (global)
+    # Suma neta por referencia
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
 
     # Texto de cuenta principal
@@ -324,7 +312,7 @@ def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
     facturas["cuenta"] = (
         facturas["account_code"].astype(str)
         + " - "
-        + facturas["account_name"].astypestr()
+        + facturas["account_name"].astype(str)
     )
 
     return facturas
@@ -489,12 +477,11 @@ else:
         # ----------------------------------------------------------------
         # Pestañas
         # ----------------------------------------------------------------
-        tab_resumen, tab_pendientes, tab_favor, tab_cruzadas = st.tabs(
+        tab_resumen, tab_pendientes, tab_favor = st.tabs(
             [
                 "📂 Resumen por cuenta vs auxiliar",
                 "📑 Facturas pendientes",
                 "💳 Facturas con saldo a favor",
-                "🔀 Referencias cruzadas entre cuentas",
             ]
         )
 
@@ -721,127 +708,3 @@ else:
                         "spreadsheetml.sheet"
                     ),
                 )
-
-        # ================================================================
-        # TAB 4: Referencias cruzadas entre cuentas
-        # ================================================================
-        with tab_cruzadas:
-            st.markdown("### Referencias cruzadas entre cuentas")
-
-            if facturas_cuenta_f.empty:
-                st.info("No hay movimientos con referencia en este rango de fechas.")
-            else:
-                # Resumen por referencia (en TODO el universo de cuentas del periodo)
-                ref_summary = (
-                    facturas_cuenta_f.groupby("referencia")
-                    .agg(
-                        fecha_min_referencia=("fecha_factura", "min"),
-                        cuentas_involucradas=("account_code", "nunique"),
-                        saldo_global=("saldo_factura", "sum"),
-                    )
-                    .reset_index()
-                )
-
-                # Bandera: referencia globalmente saldada (≈0)
-                ref_summary["es_saldo_global_cero"] = (
-                    ref_summary["saldo_global"].abs() < UMBRAL_SALDO_INICIAL
-                )
-
-                # Solo referencias que aparecen en más de una cuenta
-                cross_refs = ref_summary[ref_summary["cuentas_involucradas"] > 1].copy()
-
-                if cross_refs.empty:
-                    st.info(
-                        "No se encontraron referencias cruzadas entre cuentas con los filtros de fechas actuales."
-                    )
-                else:
-                    # Unimos contra el detalle por cuenta
-                    df_cross = facturas_cuenta_f.merge(
-                        cross_refs[
-                            [
-                                "referencia",
-                                "fecha_min_referencia",
-                                "cuentas_involucradas",
-                                "saldo_global",
-                                "es_saldo_global_cero",
-                            ]
-                        ],
-                        on="referencia",
-                        how="inner",
-                    )
-
-                    # Si el usuario filtró una cuenta, nos quedamos solo con esa cuenta,
-                    # pero conservando la información global de la referencia.
-                    if codigo_cuenta_seleccionada is not None:
-                        df_cross = df_cross[
-                            df_cross["account_code"] == codigo_cuenta_seleccionada
-                        ]
-
-                    if df_cross.empty:
-                        st.info(
-                            "No hay referencias cruzadas que involucren la cuenta seleccionada con estos filtros."
-                        )
-                    else:
-                        # Clasificamos el tipo de saldo por cuenta
-                        df_cross["tipo_saldo_cuenta"] = np.where(
-                            df_cross["saldo_factura"] > 0,
-                            "Saldo pendiente",
-                            np.where(
-                                df_cross["saldo_factura"] < 0,
-                                "Saldo a favor",
-                                "Saldo cero",
-                            ),
-                        )
-
-                        # Métricas a nivel referencia (sin duplicar por cuenta)
-                        total_refs_cruzadas = cross_refs["referencia"].nunique()
-                        total_refs_saldo_cero = cross_refs[
-                            cross_refs["es_saldo_global_cero"]
-                        ]["referencia"].nunique()
-
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.metric(
-                                "Número de referencias cruzadas (más de una cuenta)",
-                                value=int(total_refs_cruzadas),
-                            )
-                        with c2:
-                            st.metric(
-                                "Referencias cruzadas con saldo global ≈ 0",
-                                value=int(total_refs_saldo_cero),
-                            )
-
-                        st.caption(
-                            "- **cuentas_involucradas**: cuántas cuentas contables tienen movimientos con esa referencia.\n"
-                            "- **saldo_global**: suma del saldo de la referencia en todas las cuentas (si ≈0, globalmente está saldada).\n"
-                            "- **es_saldo_global_cero = True** suele indicar un pago aplicado en otra cuenta distinta al cliente de origen."
-                        )
-
-                        cols_cross = [
-                            "referencia",
-                            "fecha_min_referencia",
-                            "cuentas_involucradas",
-                            "saldo_global",
-                            "es_saldo_global_cero",
-                            "account_code",
-                            "account_name",
-                            "saldo_factura",
-                            "tipo_saldo_cuenta",
-                        ]
-
-                        df_cross_show = df_cross[cols_cross].sort_values(
-                            ["referencia", "account_code", "fecha_min_referencia"]
-                        )
-
-                        st.dataframe(df_cross_show, use_container_width=True)
-
-                        xls_cross = to_excel(df_cross_show)
-                        st.download_button(
-                            label="⬇️ Descargar referencias cruzadas en Excel",
-                            data=xls_cross,
-                            file_name="referencias_cruzadas_entre_cuentas.xlsx",
-                            mime=(
-                                "application/vnd.openxmlformats-officedocument."
-                                "spreadsheetml.sheet"
-                            ),
-                        )
