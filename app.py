@@ -6,6 +6,9 @@ import math
 from io import BytesIO
 from datetime import date
 
+# Umbral para considerar "casi cero" el saldo neto y marcar solo_saldo_inicial
+UMBRAL_SALDO_INICIAL = 1.0  # en pesos; ajusta si quieres mayor precisión
+
 st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 
 st.title("🔍 Auditoria Integracion de Saldos")
@@ -97,10 +100,9 @@ Si filtras por alguna cuenta específica:
   - Número de referencias con saldo negativo.
   - **Saldo neto** por cuenta (suma de todos los saldos netos de sus referencias).
   - Saldos del auxiliar por cuenta (`Total:` del reporte).
-  - Diferencia entre saldo neto por referencia y saldo final del auxiliar, útil para identificar:
-    - Saldos iniciales de la cuenta.
-    - Movimientos sin referencia.
-    - Posibles diferencias por periodo o por clasificación.
+  - **diferencia_vs_auxiliar** = saldo_final_cuenta_aux – saldo_neto.
+  - **saldo_no_explicado_por_facturas** = diferencia_vs_auxiliar (es el mismo valor, nombrado de forma “audit friendly”).
+  - **solo_saldo_inicial** = marca las cuentas donde, bajo un umbral pequeño, el saldo neto por facturas es casi 0 pero el auxiliar sigue mostrando saldo.
 
 Esta vista responde la pregunta:
 
@@ -129,6 +131,24 @@ Esta vista responde la pregunta:
   - Conciliación analítica por factura y por cuenta.
   - Identificación de facturas pendientes.
   - Detección de facturas cruzadas entre cuentas y posibles errores de aplicación.
+
+---
+
+**8. Marca de clientes con solo saldo inicial / movimientos sin referencia**
+
+En el resumen por cuenta:
+
+- `saldo_no_explicado_por_facturas` = `diferencia_vs_auxiliar`.  
+  Es decir, lo que queda del saldo del auxiliar después de considerar el neto de facturas.
+
+- `solo_saldo_inicial` se calcula como:
+
+> `solo_saldo_inicial = (abs(saldo_neto) < UMBRAL) and (abs(diferencia_vs_auxiliar) > UMBRAL)`
+
+Con un umbral pequeño (por defecto `UMBRAL_SALDO_INICIAL = 1.0` peso):
+
+- Si `solo_saldo_inicial = True`, significa:  
+  > “Este cliente tiene saldo en auxiliar que **no proviene de facturas vigentes**, sino de saldo inicial / otros movimientos sin referencia.”
         """
     )
 
@@ -702,7 +722,8 @@ else:
             st.caption(
                 "Agrupa por **número de cuenta + nombre de cuenta**. "
                 "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan. "
-                "Se muestran solo **saldos netos** por referencia y el saldo final del auxiliar."
+                "Se muestran solo **saldos netos** por referencia y el saldo final del auxiliar, "
+                "incluyendo columnas de conciliación para auditores."
             )
 
             # Usamos TODO el universo de facturas por cuenta (positivas y negativas), filtrado por fecha
@@ -764,6 +785,19 @@ else:
                     resumen_cuenta["saldo_final_cuenta_aux"] - resumen_cuenta["saldo_neto"]
                 )
 
+                # Nuevas columnas de auditoría:
+                # saldo_no_explicado_por_facturas y flag solo_saldo_inicial
+                resumen_cuenta["saldo_no_explicado_por_facturas"] = resumen_cuenta[
+                    "diferencia_vs_auxiliar"
+                ]
+
+                resumen_cuenta["solo_saldo_inicial"] = (
+                    resumen_cuenta["saldo_neto"].abs() < UMBRAL_SALDO_INICIAL
+                ) & (
+                    resumen_cuenta["diferencia_vs_auxiliar"].abs()
+                    > UMBRAL_SALDO_INICIAL
+                )
+
                 # Métrica global (en el rango de fechas actual): solo neto
                 saldo_neto_total = resumen_cuenta["saldo_neto"].sum()
 
@@ -777,10 +811,12 @@ else:
                 st.caption(
                     "Los saldos del auxiliar (cargos, abonos y saldo final por cuenta) "
                     "corresponden al periodo completo del reporte exportado. "
-                    "El saldo neto por referencia corresponde solo al rango de fechas filtrado."
+                    "El saldo neto por referencia corresponde solo al rango de fechas filtrado. "
+                    "Las columnas 'saldo_no_explicado_por_facturas' y 'solo_saldo_inicial' "
+                    "ayudan a identificar cuentas cuyo saldo proviene principalmente de saldo inicial u otros movimientos sin referencia."
                 )
 
-                # Tabla de resumen por cuenta (solo netos + auxiliar)
+                # Tabla de resumen por cuenta (solo netos + auxiliar + columnas nuevas)
                 st.subheader("📊 Resumen por cuenta contable")
 
                 cols_resumen = [
@@ -789,10 +825,10 @@ else:
                     "facturas_positivas",
                     "referencias_negativas",
                     "saldo_neto",
-                    "cargos_total_cuenta_aux",
-                    "abonos_total_cuenta_aux",
                     "saldo_final_cuenta_aux",
                     "diferencia_vs_auxiliar",
+                    "saldo_no_explicado_por_facturas",
+                    "solo_saldo_inicial",
                 ]
 
                 st.dataframe(
