@@ -44,9 +44,9 @@ Los movimientos **sin referencia** no se ven factura por factura, pero sí está
 
 **2. Nivel global (cartera completa)**
 
-- **Saldo neto movimientos (C-A)**: suma de todos los saldos netos de facturas.
+- **Saldo neto facturas (C-A, solo con referencia)**: suma de todos los saldos netos de facturas (positivos y negativos).
 - **Saldo final cartera (auxiliar – Total Clientes)**: lo que dice el reporte en “Total Clientes :”.
-- La diferencia entre ambos = **saldo inicial + movimientos sin referencia** (y/o fuera de rango de fechas).
+- La diferencia entre ambos = **saldo de cuentas sin facturas + movimientos sin referencia** (y/o fuera de rango de fechas).
 
 ---
 
@@ -70,9 +70,9 @@ Si `solo_saldo_inicial = True`, la lectura es:
 
 **4. Pestaña “Facturas pendientes”**
 
-- Lista solo facturas con `saldo_factura > 0`.
-- Si seleccionas una cuenta, verás únicamente las facturas **pendientes de esa cuenta**.
-- Todo está en **netos**, ya integrados cargos y abonos por referencia.
+- Lista solo facturas con `saldo_factura > 0` (detalle).
+- La métrica de **saldo** es **neta**: suma de todos los saldos por referencia en el rango (positivos y negativos).
+- Es decir, es el **saldo de cartera por facturas**, no el bruto de todas las facturas deudoras.
 
 ---
 
@@ -565,30 +565,40 @@ else:
                 )
 
         # ================================================================
-        # TAB 2: Facturas pendientes
+        # TAB 2: Facturas pendientes (NETO, no bruto)
         # ================================================================
         with tab_pendientes:
-            st.markdown("### Facturas pendientes (saldo neto > 0)")
+            st.markdown("### Facturas pendientes (detalle) y saldo neto por referencia")
 
+            # Facturas con saldo neto > 0 (detalle)
             df_pend = facturas_global_f[facturas_global_f["saldo_factura"] > 0].copy()
+
+            # Saldo neto de TODAS las referencias (positivas y negativas) en el rango/filtro
+            saldo_neto_referencias = facturas_global_f["saldo_factura"].sum()
 
             if df_pend.empty:
                 st.info("No hay facturas pendientes (saldo neto > 0) con estos filtros.")
             else:
                 total_facturas = df_pend["referencia"].nunique()
-                saldo_total = df_pend["saldo_factura"].sum()
 
                 c1, c2 = st.columns(2)
                 with c1:
                     st.metric(
-                        "Número de facturas pendientes",
+                        "Número de facturas pendientes (detalle)",
                         value=int(total_facturas),
                     )
                 with c2:
                     st.metric(
-                        "Saldo pendiente total",
-                        value=f"${saldo_total:,.2f}",
+                        "Saldo neto por referencia (en este rango y filtros)",
+                        value=f"${saldo_neto_referencias:,.2f}",
                     )
+
+                st.caption(
+                    "El saldo mostrado es **neto**: suma de todos los saldos por referencia "
+                    "(facturas con saldo positivo y facturas con saldo a favor) "
+                    "en el rango de fechas y cuenta(s) seleccionados. "
+                    "La tabla de abajo lista solo las facturas con saldo > 0 (pendientes)."
+                )
 
                 cols_detalle = [
                     "referencia",
