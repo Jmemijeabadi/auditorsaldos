@@ -11,144 +11,85 @@ UMBRAL_SALDO_INICIAL = 1.0  # en pesos; ajusta si quieres mayor precisión
 
 st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 
-st.title("🔍 Auditoria Integracion de Saldos")
+st.title("🔍 Auditoría Integración de Saldos")
 st.write(
-    "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i "
-    "y el sistema identificará las facturas no pagadas, con cuatro vistas: "
-    "**por factura (global)**, **por cuenta contable (sin cruzar cuentas)**, "
-    "**facturas cruzadas pendientes** y **facturas cruzadas pagadas**."
+    "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i. "
+    "La app calcula saldos **netos** por factura y por cuenta, y los compara contra el auxiliar."
 )
 
 # --------------------------------------------------------------------
-# Cuadro de ayuda para auditoría
+# Cuadro de ayuda para auditoría (versión simplificada)
 # --------------------------------------------------------------------
-with st.expander("ℹ️ Cómo leer este reporte (ayuda para auditoría)", expanded=False):
+with st.expander("ℹ️ Cómo leer este reporte (ayuda rápida para auditoría)", expanded=False):
     st.markdown(
         """
-**1. Alcance del análisis**
+**1. Qué hace la app**
 
-- El archivo de entrada es el reporte de **Movimientos, Auxiliares del Catálogo** exportado desde CONTPAQ i.
-- El sistema utiliza exclusivamente las filas de movimientos que:
-  - Tienen una **fecha válida** (columna 0, formato `dd/Mon/aaaa`), y  
-  - Tienen un dato en la columna **Referencia** (número de factura).
-- Los movimientos **sin referencia** (p.ej. ajustes, cargos/abonos sin folio) no se incluyen en el análisis por factura, pero sí están implícitamente contenidos en el **saldo final del auxiliar** contra el que se concilia.
-
----
-
-**2. Cómo se calculan los saldos netos**
-
-Para cada referencia de factura:
-
-- Se suman todos los **cargos** asociados a esa referencia.
-- Se suman todos los **abonos** asociados a esa misma referencia.
-- Se calcula el **saldo neto** como:
+- Lee el reporte de **Movimientos, Auxiliares del Catálogo**.
+- Toma solo las filas que:
+  - Tienen **fecha** válida (columna 0, formato `dd/Mon/aaaa`), y  
+  - Tienen valor en **Referencia** (número de factura).
+- Para cada referencia calcula el **saldo neto**:
 
 > `saldo_factura = cargos_total – abonos_total`
 
 Interpretación:
+- `saldo_factura > 0`  → factura con saldo pendiente.  
+- `saldo_factura = 0`  → factura saldada.  
+- `saldo_factura < 0`  → saldo a favor / crédito.
 
-- `saldo_factura > 0`  → factura con saldo **pendiente de cobro**.  
-- `saldo_factura = 0`  → factura **totalmente pagada / saldada**.  
-- `saldo_factura < 0`  → saldo **a favor del cliente** (créditos, notas de crédito mayores al cargo, etc.).
-
-Este cálculo se hace:
-
-- A nivel **global por referencia** (cruzando todas las cuentas de clientes).
-- A nivel **cuenta contable + referencia** (misma factura, separada por cuenta contable).
+Los movimientos **sin referencia** no se ven factura por factura, pero sí están absorbidos en el **saldo final del auxiliar**, que usamos para conciliar.
 
 ---
 
-**3. Resumen global vs auxiliar**
+**2. Nivel global (cartera completa)**
 
-En la parte superior se muestra un bloque de **conciliación**:
-
-- **Saldo neto movimientos (C-A):**  
-  Suma de todos los `saldo_factura` de las referencias encontradas en el periodo (cargos con referencia menos abonos con referencia).
-
-- **Saldo final cartera (auxiliar – Total Clientes):**  
-  Es el saldo final que aparece en la fila **“Total Clientes :”** del auxiliar (CONTPAQ).
-
-- **Diferencia (auxiliar – neto movimientos):**  
-  Diferencia entre el saldo final del auxiliar y el saldo neto de movimientos con referencia.  
-  Esta diferencia, en términos contables, refleja principalmente:
-  - El **saldo inicial** de la cartera al inicio del periodo, y
-  - Movimientos que **no traen referencia** (p.ej. ajustes, reclasificaciones, etc.) o fuera del rango de fechas filtrado.
+- **Saldo neto movimientos (C-A)**: suma de todos los saldos netos de facturas.
+- **Saldo final cartera (auxiliar – Total Clientes)**: lo que dice el reporte en “Total Clientes :”.
+- La diferencia entre ambos = **saldo inicial + movimientos sin referencia** (y/o fuera de rango de fechas).
 
 ---
 
-**4. Pestaña “📑 Por factura (global)”**
+**3. Pestaña “Resumen por cuenta vs auxiliar”**
 
-- Agrupa por **referencia de factura**, sin importar en qué cuenta contable se haya registrado.
-- Para cada factura muestra un único `saldo_factura` **neto** (C-A) a nivel grupo.
-- La “cuenta” que se visualiza es la **cuenta principal** donde se identificó el cargo de la factura.
-- Esta vista responde la pregunta:  
-  > “¿Cuál es el saldo neto de cada factura, considerando todas las cuentas donde han pasado sus cargos y abonos?”
+Por cada cuenta (cliente) muestra:
 
-Si filtras por alguna cuenta específica:
+- `saldo_neto`: suma neta de saldos de sus facturas (solo las del rango de fechas).
+- `saldo_final_cuenta_aux`: saldo final de la fila **“Total:”** del auxiliar para esa cuenta.
+- `diferencia_vs_auxiliar` = saldo_final_cuenta_aux – saldo_neto.
+- `saldo_no_explicado_por_facturas` = **igual que diferencia_vs_auxiliar**, solo con nombre más obvio para auditor.
+- `solo_saldo_inicial` = `True` cuando:
+  - El saldo neto por facturas es casi 0 (`abs(saldo_neto) < UMBRAL`), y
+  - La diferencia con el auxiliar es significativa (`abs(diferencia_vs_auxiliar) > UMBRAL`).
 
-- El sistema recalcula el saldo neto solo con las facturas cuya **cuenta principal** coincide con el filtro.
-- Adicionalmente, compara el saldo neto de esas facturas contra el **saldo final de esa(s) cuenta(s)** en el auxiliar.
+Si `solo_saldo_inicial = True`, la lectura es:
 
----
-
-**5. Pestaña “📂 Por cuenta contable (sin cruzar cuentas)”**
-
-- Agrupa por **número de cuenta + nombre de cuenta + referencia**.
-- La misma factura puede aparecer en **varias cuentas**, pero aquí se muestra **separada por cuenta**, sin cruzar saldos entre ellas.
-- Se presenta:
-  - Número de facturas con saldo positivo.
-  - Número de referencias con saldo negativo.
-  - **Saldo neto** por cuenta (suma de todos los saldos netos de sus referencias).
-  - Saldos del auxiliar por cuenta (`Total:` del reporte).
-  - **diferencia_vs_auxiliar** = saldo_final_cuenta_aux – saldo_neto.
-  - **saldo_no_explicado_por_facturas** = diferencia_vs_auxiliar (es el mismo valor, nombrado de forma “audit friendly”).
-  - **solo_saldo_inicial** = marca las cuentas donde, bajo un umbral pequeño, el saldo neto por facturas es casi 0 pero el auxiliar sigue mostrando saldo.
-
-Esta vista responde la pregunta:
-
-> “¿Cuál es el saldo neto por referencia dentro de cada cuenta contable, y cómo se reconcilia contra el saldo final del auxiliar de esa cuenta?”
+> “Esta cuenta tiene saldo en el auxiliar que **no proviene de facturas vigentes**, sino de saldo inicial u otros movimientos sin referencia.”
 
 ---
 
-**6. Pestañas de facturas cruzadas entre cuentas**
+**4. Pestaña “Facturas pendientes”**
 
-- **🧩 Facturas cruzadas pendientes:**  
-  Muestra solo las referencias que aparecen en **más de una cuenta contable** y cuyo `saldo_factura > 0`.  
-  Útil para detectar:
-  - Facturas que se originaron en una cuenta y cuyos abonos se han registrado en otras cuentas.
-  - Posibles errores de aplicación de pagos entre clientes.
-
-- **✅ Facturas cruzadas pagadas:**  
-  Mismas referencias cruzadas, pero cuyo `saldo_factura = 0`.  
-  Es una evidencia de que, aunque la factura se haya movido entre cuentas (reclasificaciones, aplicaciones cruzadas), a nivel global está **totalmente saldada**.
+- Lista solo facturas con `saldo_factura > 0`.
+- Si seleccionas una cuenta, verás únicamente las facturas **pendientes de esa cuenta**.
+- Todo está en **netos**, ya integrados cargos y abonos por referencia.
 
 ---
 
-**7. Consideraciones de auditoría**
+**5. Pestaña “Facturas con saldo a favor”**
 
-- Todos los montos visibles en las tablas de detalle se muestran como **importes netos**, ya integrando cargos y abonos por referencia.
-- El **auxiliar** sigue siendo el documento rector del saldo final; la app sirve como herramienta de:
-  - Conciliación analítica por factura y por cuenta.
-  - Identificación de facturas pendientes.
-  - Detección de facturas cruzadas entre cuentas y posibles errores de aplicación.
+- Lista facturas con `saldo_factura < 0` (notas de crédito, saldos a favor, etc.).
+- También filtrable por cuenta.
 
 ---
 
-**8. Marca de clientes con solo saldo inicial / movimientos sin referencia**
+**6. Importante**
 
-En el resumen por cuenta:
-
-- `saldo_no_explicado_por_facturas` = `diferencia_vs_auxiliar`.  
-  Es decir, lo que queda del saldo del auxiliar después de considerar el neto de facturas.
-
-- `solo_saldo_inicial` se calcula como:
-
-> `solo_saldo_inicial = (abs(saldo_neto) < UMBRAL) and (abs(diferencia_vs_auxiliar) > UMBRAL)`
-
-Con un umbral pequeño (por defecto `UMBRAL_SALDO_INICIAL = 1.0` peso):
-
-- Si `solo_saldo_inicial = True`, significa:  
-  > “Este cliente tiene saldo en auxiliar que **no proviene de facturas vigentes**, sino de saldo inicial / otros movimientos sin referencia.”
+- Los **saldos del auxiliar** siempre mandan como referencia final.
+- La app es una herramienta de **análisis**:
+  - Para ver facturas pendientes.
+  - Para conciliar saldo por cuenta vs auxiliar.
+  - Para detectar cuentas con “solo saldo inicial / ajustes” (`solo_saldo_inicial = True`).
         """
     )
 
@@ -192,27 +133,25 @@ def parse_spanish_date(s: str):
 def procesar_movimientos(file):
     """
     Lee el Excel de CONTPAQ y regresa:
-      - movs_valid: DataFrame de movimientos con referencia (y cuenta asignada).
-      - resumen_auxiliar: dict con totales globales (cargos, abonos, saldo final auxiliar, etc.)
-      - totales_cuentas_aux: DataFrame con totales por cuenta (Total: del auxiliar).
+      - movs_valid: movimientos con referencia (y cuenta asignada).
+      - resumen_auxiliar: totales globales (netos + saldo final auxiliar).
+      - totales_cuentas_aux: totales por cuenta (Total: del auxiliar).
     """
-    # Leer tal cual, sin encabezados
     raw = pd.read_excel(file, header=None)
 
-    # Detectar filas cabecera de cuenta (tienen el código de cuenta y 'Saldo inicial :')
+    # Detectar filas cabecera de cuenta (código de cuenta + 'Saldo inicial :')
     account_pattern = re.compile(r"^\d{3}-\d{3}-\d{3}-\d{3}$")
     is_account_header = raw[0].astype(str).str.match(account_pattern) & raw[
         6
     ].astype(str).str.contains("Saldo inicial", na=False)
 
-    # Rellenar código y nombre de cuenta hacia abajo
     df = raw.copy()
     df["account_code"] = np.where(is_account_header, df[0], np.nan)
     df["account_name"] = np.where(is_account_header, df[1], np.nan)
     df["account_code"] = df["account_code"].ffill()
     df["account_name"] = df["account_name"].ffill()
 
-    # Filas de movimientos: aquellas donde la columna 0 es una fecha dd/Mon/aaaa
+    # Filas de movimientos (columna 0 es fecha dd/Mon/aaaa)
     date_pattern = re.compile(r"^\d{2}/[A-Za-z]{3}/\d{4}$")
     is_date_row = df[0].astype(str).str.match(date_pattern)
 
@@ -234,19 +173,17 @@ def procesar_movimientos(file):
     for col in ["cargos", "abonos", "saldo"]:
         movs[col] = pd.to_numeric(movs[col], errors="coerce")
 
-    # Limpiar referencia (número de factura)
+    # Limpiar referencia
     movs["referencia"] = movs["referencia"].astype(str).str.strip()
     movs["referencia"] = movs["referencia"].replace({"nan": np.nan, "": np.nan})
 
     # Convertir fecha
     movs["fecha"] = movs["fecha_raw"].apply(parse_spanish_date)
 
-    # Movimientos con número de factura
+    # Solo movimientos con referencia
     movs_valid = movs[movs["referencia"].notna()].copy()
 
-    # ----------------------------------------------------------------
-    # Totales globales del auxiliar (fila 'Total Clientes :')
-    # ----------------------------------------------------------------
+    # Totales globales del auxiliar ("Total Clientes :")
     total_cargos_aux = np.nan
     total_abonos_aux = np.nan
     saldo_final_aux = np.nan
@@ -259,7 +196,6 @@ def procesar_movimientos(file):
         total_abonos_aux = pd.to_numeric(row[2], errors="coerce")
         saldo_final_aux = pd.to_numeric(row[3], errors="coerce")
 
-    # Totales de movimientos (solo filas con referencia)
     total_cargos_movs = movs_valid["cargos"].sum()
     total_abonos_movs = movs_valid["abonos"].sum()
     saldo_neto_movs = total_cargos_movs - total_abonos_movs
@@ -269,20 +205,14 @@ def procesar_movimientos(file):
         saldo_inicial_implicito = saldo_final_aux - saldo_neto_movs
 
     resumen_auxiliar = {
-        "total_cargos_movs": float(total_cargos_movs),
-        "total_abonos_movs": float(total_abonos_movs),
         "saldo_neto_movs": float(saldo_neto_movs),
-        "total_cargos_aux": float(total_cargos_aux) if not math.isnan(total_cargos_aux) else None,
-        "total_abonos_aux": float(total_abonos_aux) if not math.isnan(total_abonos_aux) else None,
         "saldo_final_aux": float(saldo_final_aux) if not math.isnan(saldo_final_aux) else None,
         "saldo_inicial_implicito": float(saldo_inicial_implicito)
         if not math.isnan(saldo_inicial_implicito)
         else None,
     }
 
-    # ----------------------------------------------------------------
-    # Totales por cuenta (fila 'Total:' en la columna 4)
-    # ----------------------------------------------------------------
+    # Totales por cuenta (filas "Total:" en col 4)
     tot_rows = df[df[4].astype(str).str.strip() == "Total:"].copy()
     for c in [5, 6, 7]:
         tot_rows[c] = pd.to_numeric(tot_rows[c], errors="coerce")
@@ -318,11 +248,9 @@ def procesar_movimientos(file):
 @st.cache_data
 def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     """
-    Construye facturas a nivel global (por referencia), cruzando todas las cuentas.
-    Asigna una 'cuenta principal' por factura (normalmente donde está el cargo) y
-    calcula en cuántas cuentas aparece cada referencia.
+    Facturas a nivel global (por referencia), cruzando todas las cuentas.
+    Asigna una cuenta principal (normalmente donde está el cargo).
     """
-    # 1) Agregados globales por referencia
     facturas = (
         movs_valid.groupby("referencia")
         .agg(
@@ -333,11 +261,9 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    # 2) Determinar cuenta principal (preferimos donde haya cargos positivos)
     movs_valid = movs_valid.copy()
     movs_valid["es_cargo_pos"] = movs_valid["cargos"] > 0
 
-    # a) Principal desde cargos positivos (factura original)
     main_from_cargo = (
         movs_valid[movs_valid["es_cargo_pos"]]
         .sort_values(["referencia", "cargos"], ascending=[True, False])
@@ -345,7 +271,6 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
         [["referencia", "account_code", "account_name"]]
     )
 
-    # b) Para referencias sin cargos positivos, tomar el primer movimiento que aparezca
     main_any = (
         movs_valid.sort_values(["referencia", "fecha"])
         .drop_duplicates("referencia")
@@ -357,31 +282,15 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
 
     facturas = facturas.merge(main_account, on="referencia", how="left")
 
-    # 3) Número de cuentas involucradas por referencia + lista de cuentas
-    cuentas_por_factura = (
-        movs_valid.groupby("referencia")["account_code"]
-        .nunique()
-        .reset_index(name="num_cuentas")
-    )
-    facturas = facturas.merge(cuentas_por_factura, on="referencia", how="left")
-    facturas["num_cuentas"] = facturas["num_cuentas"].fillna(0).astype(int)
-    facturas["cruza_cuentas"] = facturas["num_cuentas"] > 1
-
-    # Lista de cuentas involucradas (código + nombre) como texto
-    cuentas_involucradas = (
-        movs_valid.assign(
-            cuenta=lambda d: d["account_code"].astype(str)
-            + " - "
-            + d["account_name"].astype(str)
-        )
-        .groupby("referencia")["cuenta"]
-        .apply(lambda x: " | ".join(sorted(set(x))))
-        .reset_index(name="cuentas_involucradas")
-    )
-    facturas = facturas.merge(cuentas_involucradas, on="referencia", how="left")
-
-    # 4) Saldo pendiente por referencia (neto C-A)
+    # Suma neta por referencia
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
+
+    # Texto de cuenta principal
+    facturas["cuenta"] = (
+        facturas["account_code"].astype(str)
+        + " - "
+        + facturas["account_name"].astype(str)
+    )
 
     return facturas
 
@@ -389,8 +298,7 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data
 def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
     """
-    Construye facturas por cuenta contable (sin cruzar cuentas).
-    Una misma referencia puede aparecer en varias cuentas.
+    Facturas por cuenta contable (sin cruzar cuentas).
     """
     group_cols = ["account_code", "account_name", "referencia"]
     facturas = (
@@ -403,11 +311,18 @@ def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
+
+    facturas["cuenta"] = (
+        facturas["account_code"].astype(str)
+        + " - "
+        + facturas["account_name"].astype(str)
+    )
+
     return facturas
 
 
 def filtrar_por_fecha(df: pd.DataFrame, fecha_desde: date, fecha_hasta: date) -> pd.DataFrame:
-    """Filtra un DataFrame de facturas por rango de fechas."""
+    """Filtra un DataFrame por columna fecha_factura."""
     mask = pd.Series(True, index=df.index)
     if fecha_desde:
         mask &= df["fecha_factura"] >= pd.to_datetime(fecha_desde)
@@ -443,18 +358,11 @@ else:
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
-    # Solo facturas con saldo pendiente > 0 (para algunas vistas)
-    facturas_global_pend = facturas_global[facturas_global["saldo_factura"] > 0].copy()
-    facturas_cuenta_pend = facturas_cuenta[facturas_cuenta["saldo_factura"] > 0].copy()
-
-    # Si de plano no hay facturas, salimos
     if facturas_global.empty and facturas_cuenta.empty:
         st.success("✅ No se encontraron facturas en el archivo.")
     else:
-        # ------------------------------------------------------------
-        # RESUMEN GLOBAL VS AUXILIAR (solo netos)
-        # ------------------------------------------------------------
-        st.subheader("📊 Resumen global vs auxiliar")
+        # ------------------------- Resumen global (súper simple) -------------------------
+        st.subheader("📊 Resumen global vs auxiliar (netos)")
 
         colg1, colg2, colg3 = st.columns(3)
         with colg1:
@@ -465,14 +373,11 @@ else:
         with colg2:
             if resumen_aux.get("saldo_final_aux") is not None:
                 st.metric(
-                    "Saldo final cartera (auxiliar - Total Clientes)",
+                    "Saldo final cartera (auxiliar – Total Clientes)",
                     value=f"${resumen_aux['saldo_final_aux']:,.2f}",
                 )
             else:
-                st.metric(
-                    "Saldo final cartera (auxiliar)",
-                    value="N/D",
-                )
+                st.metric("Saldo final cartera (auxiliar)", value="N/D")
         with colg3:
             if (
                 resumen_aux.get("saldo_final_aux") is not None
@@ -482,23 +387,20 @@ else:
                     resumen_aux["saldo_final_aux"] - resumen_aux["saldo_neto_movs"]
                 )
                 st.metric(
-                    "Diferencia (auxiliar - neto movimientos)",
+                    "Diferencia (auxiliar – neto movimientos)",
                     value=f"${diferencia_global:,.2f}",
                 )
             else:
-                st.metric(
-                    "Diferencia (auxiliar - neto movimientos)",
-                    value="N/D",
-                )
+                st.metric("Diferencia (auxiliar – neto movimientos)", value="N/D")
 
         if resumen_aux.get("saldo_inicial_implicito") is not None:
             st.caption(
                 f"Saldo inicial implícito según auxiliar: "
                 f"${resumen_aux['saldo_inicial_implicito']:,.2f} "
-                f"(Saldo final auxiliar - saldo neto de movimientos con referencia)."
+                f"(Saldo final auxiliar – saldo neto de movimientos con referencia)."
             )
 
-        # Rango de fechas global para filtros (usamos todas las facturas, no solo pendientes)
+        # ------------------------- Filtros globales -------------------------
         all_fechas = pd.concat(
             [
                 facturas_global["fecha_factura"],
@@ -509,9 +411,9 @@ else:
         min_date = all_fechas.min()
         max_date = all_fechas.max()
 
-        st.subheader("📌 Filtros de periodo")
+        st.subheader("📌 Filtros")
 
-        col_f1, col_f2 = st.columns(2)
+        col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
         with col_f1:
             fecha_desde = st.date_input(
                 "Fecha desde",
@@ -526,255 +428,63 @@ else:
                 min_value=min_date.date() if pd.notna(min_date) else None,
                 max_value=max_date.date() if pd.notna(max_date) else None,
             )
+        with col_f3:
+            # Lista de cuentas para filtrar (opcional)
+            todas_cuentas = (
+                facturas_cuenta["cuenta"].dropna().sort_values().unique().tolist()
+            )
+            opciones_cuentas = ["(Todas las cuentas)"] + todas_cuentas
+            cuenta_seleccionada = st.selectbox(
+                "Cuenta contable (opcional)",
+                options=opciones_cuentas,
+                index=0,
+            )
+
+        # Aplica filtro de fechas a las dos vistas base
+        facturas_global_f = filtrar_por_fecha(facturas_global, fecha_desde, fecha_hasta)
+        facturas_cuenta_f = filtrar_por_fecha(facturas_cuenta, fecha_desde, fecha_hasta)
+
+        # Filtro por cuenta (si aplica)
+        if cuenta_seleccionada != "(Todas las cuentas)":
+            facturas_global_f = facturas_global_f[
+                facturas_global_f["cuenta"] == cuenta_seleccionada
+            ]
+            facturas_cuenta_f = facturas_cuenta_f[
+                facturas_cuenta_f["cuenta"] == cuenta_seleccionada
+            ]
 
         # ----------------------------------------------------------------
-        # Vistas en pestañas
+        # Pestañas
         # ----------------------------------------------------------------
-        (
-            tab_global,
-            tab_cuenta,
-            tab_cruzadas,
-            tab_cruzadas_pagadas,
-        ) = st.tabs(
+        tab_resumen, tab_pendientes, tab_favor = st.tabs(
             [
-                "📑 Por factura (global)",
-                "📂 Por cuenta contable (sin cruzar cuentas)",
-                "🧩 Facturas cruzadas pendientes",
-                "✅ Facturas cruzadas pagadas",
+                "📂 Resumen por cuenta vs auxiliar",
+                "📑 Facturas pendientes",
+                "💳 Facturas con saldo a favor",
             ]
         )
 
         # ================================================================
-        # TAB 1: Por factura (global)
+        # TAB 1: Resumen por cuenta vs auxiliar
         # ================================================================
-        with tab_global:
-            st.markdown("### Vista por factura (global)")
-            st.caption(
-                "Agrupa por **referencia de factura**, cruzando todas las cuentas de clientes. "
-                "Muestra el **saldo neto** por factura a nivel global y permite conciliar por cuenta."
-            )
+        with tab_resumen:
+            st.markdown("### Resumen por cuenta contable vs auxiliar")
 
-            # Filtramos el universo completo de referencias en el rango de fechas
-            facturas_global_filtradas = filtrar_por_fecha(
-                facturas_global, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
-            ).copy()
-
-            # Agregamos columna de texto de cuenta principal
-            facturas_global_filtradas["cuenta"] = (
-                facturas_global_filtradas["account_code"].astype(str)
-                + " - "
-                + facturas_global_filtradas["account_name"].astype(str)
-            )
-
-            # Selector de cuenta principal
-            cuentas_global = (
-                facturas_global_filtradas["cuenta"]
-                .dropna()
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            cuentas_sel_global = st.multiselect(
-                "Cuenta principal (opcional)",
-                options=cuentas_global,
-                default=[],
-                key="cuentas_global",
-            )
-
-            # Aplicamos filtro por cuenta (si se selecciona)
-            if cuentas_sel_global:
-                subset_all = facturas_global_filtradas[
-                    facturas_global_filtradas["cuenta"].isin(cuentas_sel_global)
-                ].copy()
+            if facturas_cuenta_f.empty:
+                st.info("No hay movimientos con referencia en este rango de fechas / filtros.")
             else:
-                subset_all = facturas_global_filtradas
-
-            if subset_all.empty:
-                st.info("No hay facturas en este rango de fechas / filtros.")
-            else:
-                # Saldos netos por referencia dentro del filtro actual
-                saldo_neto_referencias = subset_all["saldo_factura"].sum()
-
-                st.subheader("📊 Resumen por referencia (según filtros actuales)")
-
-                col_resumen = st.columns(1)[0]
-                with col_resumen:
-                    st.metric(
-                        "Saldo neto por referencia (C-A)",
-                        value=f"${saldo_neto_referencias:,.2f}",
-                    )
-
-                # Conciliación contra auxiliar para las cuentas seleccionadas (si aplica)
-                if cuentas_sel_global:
-                    aux_tmp = totales_cuentas_aux.copy()
-                    aux_tmp["cuenta"] = (
-                        aux_tmp["account_code"].astype(str)
-                        + " - "
-                        + aux_tmp["account_name"].astype(str)
-                    )
-                    aux_subset = aux_tmp[aux_tmp["cuenta"].isin(cuentas_sel_global)]
-
-                    saldo_final_aux_sel = aux_subset["saldo_final_cuenta_aux"].sum()
-
-                    c4, c5 = st.columns(2)
-                    with c4:
-                        st.metric(
-                            "Saldo final cuenta(s) (auxiliar)",
-                            value=f"${saldo_final_aux_sel:,.2f}",
-                        )
-                    with c5:
-                        diferencia_vs_aux = saldo_final_aux_sel - saldo_neto_referencias
-                        st.metric(
-                            "Diferencia vs auxiliar",
-                            value=f"${diferencia_vs_aux:,.2f}",
-                        )
-
-                    st.caption(
-                        "La diferencia vs auxiliar incluye saldo inicial de la(s) cuenta(s) "
-                        "y movimientos sin referencia o fuera del rango de fechas."
-                    )
-                else:
-                    # Conciliación global contra auxiliar (si tenemos dato)
-                    if resumen_aux.get("saldo_final_aux") is not None:
-                        diferencia_vs_aux_global = (
-                            resumen_aux["saldo_final_aux"] - saldo_neto_referencias
-                        )
-                        st.caption(
-                            f"Saldo final auxiliar global (Total Clientes): "
-                            f"${resumen_aux['saldo_final_aux']:,.2f}. "
-                            f"Diferencia vs saldo neto por referencia: "
-                            f"${diferencia_vs_aux_global:,.2f} "
-                            f"(incluye saldo inicial global y movimientos sin referencia)."
-                        )
-
-                # Ahora solo pendientes (saldo > 0) para detalle
-                df_tab1 = subset_all[subset_all["saldo_factura"] > 0].copy()
-
-                if df_tab1.empty:
-                    st.info(
-                        "No hay facturas pendientes (saldo > 0) con estos filtros."
-                    )
-                else:
-                    # Resumen por cuenta principal (solo facturas pendientes)
-                    st.subheader("📊 Resumen por cuenta principal (solo pendientes)")
-
-                    resumen_global = (
-                        df_tab1.groupby(["account_code", "account_name"])
-                        .agg(
-                            facturas_pendientes=("referencia", "nunique"),
-                            saldo_pendiente_total=("saldo_factura", "sum"),
-                        )
-                        .reset_index()
-                        .sort_values("saldo_pendiente_total", ascending=False)
-                    )
-
-                    c4, c5 = st.columns(2)
-                    with c4:
-                        st.metric(
-                            "Total de facturas pendientes (global)",
-                            value=int(df_tab1["referencia"].nunique()),
-                        )
-                    with c5:
-                        st.metric(
-                            "Saldo pendiente total (solo facturas positivas)",
-                            value=f"${df_tab1['saldo_factura'].sum():,.2f}",
-                        )
-
-                    st.dataframe(resumen_global, use_container_width=True)
-
-                    # Detalle por factura (solo netos)
-                    st.subheader("📄 Detalle de facturas (global)")
-
-                    cols_detalle_global = [
-                        "referencia",
-                        "fecha_factura",
-                        "saldo_factura",
-                        "account_code",
-                        "account_name",
-                        "num_cuentas",
-                        "cruza_cuentas",
-                        "cuentas_involucradas",
-                    ]
-
-                    df_detalle_global = df_tab1[cols_detalle_global].sort_values(
-                        ["fecha_factura", "referencia"]
-                    )
-
-                    st.dataframe(df_detalle_global, use_container_width=True)
-
-                    # Descarga Excel
-                    xls_global = to_excel(df_detalle_global)
-                    st.download_button(
-                        label="⬇️ Descargar detalle global en Excel",
-                        data=xls_global,
-                        file_name="facturas_pendientes_global.xlsx",
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument."
-                            "spreadsheetml.sheet"
-                        ),
-                    )
-
-        # ================================================================
-        # TAB 2: Por cuenta contable (sin cruzar cuentas)
-        # ================================================================
-        with tab_cuenta:
-            st.markdown("### Vista por cuenta contable (sin cruzar cuentas)")
-            st.caption(
-                "Agrupa por **número de cuenta + nombre de cuenta**. "
-                "La misma referencia puede aparecer en varias cuentas; aquí NO se cruzan. "
-                "Se muestran solo **saldos netos** por referencia y el saldo final del auxiliar, "
-                "incluyendo columnas de conciliación para auditores."
-            )
-
-            # Usamos TODO el universo de facturas por cuenta (positivas y negativas), filtrado por fecha
-            df_cuenta_all = filtrar_por_fecha(
-                facturas_cuenta,
-                fecha_desde=fecha_desde,
-                fecha_hasta=fecha_hasta,
-            )
-
-            # Columna de texto de cuenta
-            df_cuenta_all["cuenta"] = (
-                df_cuenta_all["account_code"].astype(str)
-                + " - "
-                + df_cuenta_all["account_name"].astype(str)
-            )
-
-            cuentas_cuenta = (
-                df_cuenta_all["cuenta"]
-                .dropna()
-                .sort_values()
-                .unique()
-                .tolist()
-            )
-            cuentas_sel_cuenta = st.multiselect(
-                "Cuenta contable",
-                options=cuentas_cuenta,
-                default=[],
-                key="cuentas_cuenta",
-            )
-            if cuentas_sel_cuenta:
-                df_cuenta_all = df_cuenta_all[
-                    df_cuenta_all["cuenta"].isin(cuentas_sel_cuenta)
-                ]
-
-            if df_cuenta_all.empty:
-                st.info("No hay facturas en este rango de fechas / filtros.")
-            else:
-                # Resumen por cuenta: usamos saldo neto; positivas/negativas solo internas
+                # Resumen por cuenta con saldo neto
                 resumen_cuenta = (
-                    df_cuenta_all.groupby(["account_code", "account_name"])
+                    facturas_cuenta_f.groupby(["account_code", "account_name"])
                     .agg(
-                        facturas_positivas=("saldo_factura", lambda s: int((s > 0).sum())),
-                        saldo_positivas=("saldo_factura", lambda s: float(s[s > 0].sum())),
-                        referencias_negativas=("saldo_factura", lambda s: int((s < 0).sum())),
-                        saldo_negativas=("saldo_factura", lambda s: float(s[s < 0].sum())),
                         saldo_neto=("saldo_factura", "sum"),
+                        facturas_positivas=("saldo_factura", lambda s: int((s > 0).sum())),
+                        referencias_negativas=("saldo_factura", lambda s: int((s < 0).sum())),
                     )
                     .reset_index()
                 )
 
-                # Unimos totales del auxiliar por cuenta (cargos, abonos, saldo final)
+                # Unir saldos del auxiliar
                 resumen_cuenta = resumen_cuenta.merge(
                     totales_cuentas_aux,
                     on=["account_code", "account_name"],
@@ -785,8 +495,6 @@ else:
                     resumen_cuenta["saldo_final_cuenta_aux"] - resumen_cuenta["saldo_neto"]
                 )
 
-                # Nuevas columnas de auditoría:
-                # saldo_no_explicado_por_facturas y flag solo_saldo_inicial
                 resumen_cuenta["saldo_no_explicado_por_facturas"] = resumen_cuenta[
                     "diferencia_vs_auxiliar"
                 ]
@@ -798,26 +506,19 @@ else:
                     > UMBRAL_SALDO_INICIAL
                 )
 
-                # Métrica global (en el rango de fechas actual): solo neto
+                # Métrica global de saldo neto en rango
                 saldo_neto_total = resumen_cuenta["saldo_neto"].sum()
-
-                col_net = st.columns(1)[0]
-                with col_net:
-                    st.metric(
-                        "Saldo neto por referencia (en rango)",
-                        value=f"${saldo_neto_total:,.2f}",
-                    )
-
-                st.caption(
-                    "Los saldos del auxiliar (cargos, abonos y saldo final por cuenta) "
-                    "corresponden al periodo completo del reporte exportado. "
-                    "El saldo neto por referencia corresponde solo al rango de fechas filtrado. "
-                    "Las columnas 'saldo_no_explicado_por_facturas' y 'solo_saldo_inicial' "
-                    "ayudan a identificar cuentas cuyo saldo proviene principalmente de saldo inicial u otros movimientos sin referencia."
+                st.metric(
+                    "Saldo neto total por referencia (en rango y filtro)",
+                    value=f"${saldo_neto_total:,.2f}",
                 )
 
-                # Tabla de resumen por cuenta (solo netos + auxiliar + columnas nuevas)
-                st.subheader("📊 Resumen por cuenta contable")
+                st.caption(
+                    "La columna **saldo_no_explicado_por_facturas** muestra la diferencia entre "
+                    "el saldo final del auxiliar y el saldo neto de facturas en el rango. "
+                    "Si **solo_saldo_inicial** es True, la cuenta tiene saldo en auxiliar que no proviene "
+                    "de facturas vigentes (saldo inicial / otros movimientos sin referencia)."
+                )
 
                 cols_resumen = [
                     "account_code",
@@ -826,7 +527,6 @@ else:
                     "referencias_negativas",
                     "saldo_neto",
                     "saldo_final_cuenta_aux",
-                    "diferencia_vs_auxiliar",
                     "saldo_no_explicado_por_facturas",
                     "solo_saldo_inicial",
                 ]
@@ -838,53 +538,51 @@ else:
                     use_container_width=True,
                 )
 
-                # Detalle de facturas pendientes (solo saldo > 0) por cuenta
-                st.subheader("📄 Detalle de facturas pendientes por cuenta contable")
+        # ================================================================
+        # TAB 2: Facturas pendientes
+        # ================================================================
+        with tab_pendientes:
+            st.markdown("### Facturas pendientes (saldo neto > 0)")
 
-                df_pend_cuenta = df_cuenta_all[df_cuenta_all["saldo_factura"] > 0].copy()
-                df_pend_cuenta = df_pend_cuenta.sort_values(
-                    ["account_code", "account_name", "fecha_factura", "referencia"]
-                )
+            df_pend = facturas_global_f[facturas_global_f["saldo_factura"] > 0].copy()
 
-                for (code, name), grp in df_pend_cuenta.groupby(
-                    ["account_code", "account_name"], sort=False
-                ):
-                    total_cuenta = grp["saldo_factura"].sum()
-                    num_facturas = grp["referencia"].nunique()
+            if df_pend.empty:
+                st.info("No hay facturas pendientes (saldo neto > 0) con estos filtros.")
+            else:
+                total_facturas = df_pend["referencia"].nunique()
+                saldo_total = df_pend["saldo_factura"].sum()
 
-                    titulo = (
-                        f"{code} - {name}  |  {num_facturas} facturas con saldo positivo  |  "
-                        f"saldo pendiente ${total_cuenta:,.2f}"
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric(
+                        "Número de facturas pendientes",
+                        value=int(total_facturas),
+                    )
+                with c2:
+                    st.metric(
+                        "Saldo pendiente total",
+                        value=f"${saldo_total:,.2f}",
                     )
 
-                    with st.expander(titulo, expanded=False):
-                        st.dataframe(
-                            grp[
-                                [
-                                    "referencia",
-                                    "fecha_factura",
-                                    "saldo_factura",
-                                ]
-                            ].sort_values(["fecha_factura", "referencia"]),
-                            use_container_width=True,
-                        )
+                cols_detalle = [
+                    "referencia",
+                    "fecha_factura",
+                    "saldo_factura",
+                    "account_code",
+                    "account_name",
+                ]
 
-                # Descarga Excel (detalle por cuenta, solo pendientes, solo netos)
-                xls_cuenta = to_excel(
-                    df_pend_cuenta[
-                        [
-                            "account_code",
-                            "account_name",
-                            "referencia",
-                            "fecha_factura",
-                            "saldo_factura",
-                        ]
-                    ]
+                df_detalle = df_pend[cols_detalle].sort_values(
+                    ["account_code", "fecha_factura", "referencia"]
                 )
+
+                st.dataframe(df_detalle, use_container_width=True)
+
+                xls_pend = to_excel(df_detalle)
                 st.download_button(
-                    label="⬇️ Descargar detalle por cuenta en Excel (solo pendientes, netos)",
-                    data=xls_cuenta,
-                    file_name="facturas_pendientes_por_cuenta.xlsx",
+                    label="⬇️ Descargar facturas pendientes en Excel",
+                    data=xls_pend,
+                    file_name="facturas_pendientes.xlsx",
                     mime=(
                         "application/vnd.openxmlformats-officedocument."
                         "spreadsheetml.sheet"
@@ -892,218 +590,52 @@ else:
                 )
 
         # ================================================================
-        # TAB 3: Facturas cruzadas entre cuentas pendientes
+        # TAB 3: Facturas con saldo a favor
         # ================================================================
-        with tab_cruzadas:
-            st.markdown("### Facturas cruzadas entre cuentas (pendientes)")
-            st.caption(
-                "Muestra solo facturas (referencias) que aparecen en **más de una cuenta contable** "
-                "y que todavía tienen saldo pendiente (saldo neto > 0)."
-            )
+        with tab_favor:
+            st.markdown("### Facturas con saldo a favor (saldo neto < 0)")
 
-            df_tab3_base = filtrar_por_fecha(
-                facturas_global_pend,
-                fecha_desde=fecha_desde,
-                fecha_hasta=fecha_hasta,
-            )
+            df_favor = facturas_global_f[facturas_global_f["saldo_factura"] < 0].copy()
 
-            df_tab3 = df_tab3_base[df_tab3_base["cruza_cuentas"]].copy()
-
-            if df_tab3.empty:
-                st.info(
-                    "No se encontraron facturas cruzadas pendientes "
-                    "en este rango de fechas."
-                )
+            if df_favor.empty:
+                st.info("No hay facturas con saldo a favor (saldo neto < 0) con estos filtros.")
             else:
-                # Construir columna de cuenta principal (texto)
-                df_tab3["cuenta_principal"] = (
-                    df_tab3["account_code"].astype(str)
-                    + " - "
-                    + df_tab3["account_name"].astype(str)
-                )
+                total_refs = df_favor["referencia"].nunique()
+                saldo_total_favor = df_favor["saldo_factura"].sum()
 
-                # Calcular otras cuentas (todas menos la principal)
-                def get_otras_cuentas(row):
-                    if pd.isna(row["cuentas_involucradas"]):
-                        return ""
-                    cuentas = [c.strip() for c in str(row["cuentas_involucradas"]).split("|")]
-                    principal = str(row["cuenta_principal"]).strip()
-                    otras = [c for c in cuentas if c != principal]
-                    return " | ".join(otras)
-
-                df_tab3["otras_cuentas"] = df_tab3.apply(get_otras_cuentas, axis=1)
-
-                # Filtro opcional por cuenta principal
-                cuentas_principales = (
-                    df_tab3["cuenta_principal"].dropna().sort_values().unique().tolist()
-                )
-                cuentas_sel_princ = st.multiselect(
-                    "Filtrar por cuenta principal (opcional)",
-                    options=cuentas_principales,
-                    default=[],
-                    key="cuentas_principales_cruzadas_pend",
-                )
-                if cuentas_sel_princ:
-                    df_tab3 = df_tab3[
-                        df_tab3["cuenta_principal"].isin(cuentas_sel_princ)
-                    ]
-
-                if df_tab3.empty:
-                    st.info(
-                        "No hay facturas cruzadas pendientes que cumplan con los filtros seleccionados."
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric(
+                        "Número de referencias con saldo a favor",
+                        value=int(total_refs),
                     )
-                else:
-                    st.subheader("📊 Resumen de facturas cruzadas pendientes")
-
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.metric(
-                            "Facturas cruzadas pendientes",
-                            value=int(df_tab3["referencia"].nunique()),
-                        )
-                    with c2:
-                        st.metric(
-                            "Saldo pendiente total (facturas cruzadas)",
-                            value=f"${df_tab3['saldo_factura'].sum():,.2f}",
-                        )
-
-                    # Detalle de facturas cruzadas (solo netos)
-                    st.subheader("📄 Detalle de facturas cruzadas pendientes")
-
-                    cols_cruzadas = [
-                        "referencia",
-                        "fecha_factura",
-                        "saldo_factura",
-                        "cuenta_principal",
-                        "otras_cuentas",
-                        "num_cuentas",
-                        "cuentas_involucradas",
-                    ]
-
-                    df_detalle_cruzadas = df_tab3[cols_cruzadas].sort_values(
-                        ["fecha_factura", "referencia"]
+                with c2:
+                    st.metric(
+                        "Saldo total a favor (neto, suele ser negativo)",
+                        value=f"${saldo_total_favor:,.2f}",
                     )
 
-                    st.dataframe(df_detalle_cruzadas, use_container_width=True)
+                cols_detalle_f = [
+                    "referencia",
+                    "fecha_factura",
+                    "saldo_factura",
+                    "account_code",
+                    "account_name",
+                ]
 
-                    # Descarga Excel
-                    xls_cruzadas = to_excel(df_detalle_cruzadas)
-                    st.download_button(
-                        label="⬇️ Descargar detalle de facturas cruzadas pendientes en Excel",
-                        data=xls_cruzadas,
-                        file_name="facturas_cruzadas_pendientes.xlsx",
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument."
-                            "spreadsheetml.sheet"
-                        ),
-                    )
-
-        # ================================================================
-        # TAB 4: Facturas cruzadas entre cuentas pagadas
-        # ================================================================
-        with tab_cruzadas_pagadas:
-            st.markdown("### Facturas cruzadas entre cuentas (pagadas)")
-            st.caption(
-                "Muestra facturas cruzadas entre cuentas cuya integración de cargos y abonos "
-                "da como resultado **saldo neto 0** (consideradas pagadas)."
-            )
-
-            df_tab4_base = filtrar_por_fecha(
-                facturas_global,
-                fecha_desde=fecha_desde,
-                fecha_hasta=fecha_hasta,
-            )
-
-            # Definimos 'pagadas' como saldo_factura == 0; si quieres incluir saldos a favor, cambia a <= 0
-            df_tab4 = df_tab4_base[
-                (df_tab4_base["cruza_cuentas"]) & (df_tab4_base["saldo_factura"] == 0)
-            ].copy()
-
-            if df_tab4.empty:
-                st.info(
-                    "No se encontraron facturas cruzadas pagadas "
-                    "en este rango de fechas."
-                )
-            else:
-                # Cuenta principal (texto)
-                df_tab4["cuenta_principal"] = (
-                    df_tab4["account_code"].astype(str)
-                    + " - "
-                    + df_tab4["account_name"].astype(str)
+                df_detalle_f = df_favor[cols_detalle_f].sort_values(
+                    ["account_code", "fecha_factura", "referencia"]
                 )
 
-                # Otras cuentas
-                def get_otras_cuentas_pag(row):
-                    if pd.isna(row["cuentas_involucradas"]):
-                        return ""
-                    cuentas = [c.strip() for c in str(row["cuentas_involucradas"]).split("|")]
-                    principal = str(row["cuenta_principal"]).strip()
-                    otras = [c for c in cuentas if c != principal]
-                    return " | ".join(otras)
+                st.dataframe(df_detalle_f, use_container_width=True)
 
-                df_tab4["otras_cuentas"] = df_tab4.apply(get_otras_cuentas_pag, axis=1)
-
-                # Filtro opcional por cuenta principal
-                cuentas_principales_pag = (
-                    df_tab4["cuenta_principal"].dropna().sort_values().unique().tolist()
+                xls_favor = to_excel(df_detalle_f)
+                st.download_button(
+                    label="⬇️ Descargar facturas con saldo a favor en Excel",
+                    data=xls_favor,
+                    file_name="facturas_saldo_a_favor.xlsx",
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
                 )
-                cuentas_sel_princ_pag = st.multiselect(
-                    "Filtrar por cuenta principal (opcional)",
-                    options=cuentas_principales_pag,
-                    default=[],
-                    key="cuentas_principales_cruzadas_pag",
-                )
-                if cuentas_sel_princ_pag:
-                    df_tab4 = df_tab4[
-                        df_tab4["cuenta_principal"].isin(cuentas_sel_princ_pag)
-                    ]
-
-                if df_tab4.empty:
-                    st.info(
-                        "No hay facturas cruzadas pagadas que cumplan con los filtros seleccionados."
-                    )
-                else:
-                    st.subheader("📊 Resumen de facturas cruzadas pagadas")
-
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.metric(
-                            "Facturas cruzadas pagadas",
-                            value=int(df_tab4["referencia"].nunique()),
-                        )
-                    with c2:
-                        st.metric(
-                            "Saldo total (debería ser 0)",
-                            value=f"${df_tab4['saldo_factura'].sum():,.2f}",
-                        )
-
-                    # Detalle (solo netos)
-                    st.subheader("📄 Detalle de facturas cruzadas pagadas")
-
-                    cols_cruzadas_pag = [
-                        "referencia",
-                        "fecha_factura",
-                        "saldo_factura",
-                        "cuenta_principal",
-                        "otras_cuentas",
-                        "num_cuentas",
-                        "cuentas_involucradas",
-                    ]
-
-                    df_detalle_cruzadas_pag = df_tab4[cols_cruzadas_pag].sort_values(
-                        ["fecha_factura", "referencia"]
-                    )
-
-                    st.dataframe(df_detalle_cruzadas_pag, use_container_width=True)
-
-                    # Descarga
-                    xls_cruzadas_pag = to_excel(df_detalle_cruzadas_pag)
-                    st.download_button(
-                        label="⬇️ Descargar detalle de facturas cruzadas pagadas en Excel",
-                        data=xls_cruzadas_pag,
-                        file_name="facturas_cruzadas_pagadas.xlsx",
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument."
-                            "spreadsheetml.sheet"
-                        ),
-                    )
