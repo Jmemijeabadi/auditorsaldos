@@ -143,7 +143,7 @@ def procesar_movimientos(file):
     account_pattern = re.compile(r"^\d{3}-\d{3}-\d{3}-\d{3}$")
     is_account_header = raw[0].astype(str).str.match(account_pattern) & raw[
         6
-    ].astype(str).str.contains("Saldo inicial", na=False)
+    ].astype(str).str.contains("Saldo inicial", case=False, na=False)
 
     df = raw.copy()
     df["account_code"] = np.where(is_account_header, df[0], np.nan)
@@ -188,13 +188,15 @@ def procesar_movimientos(file):
     total_abonos_aux = np.nan
     saldo_final_aux = np.nan
 
-    mask_total_clientes = raw[0].astype(str).str.strip() == "Total Clientes :"
+    # En tu archivo, "Total Clientes :" está en la columna 4,
+    # y sus Cargos / Abonos / Saldo están en las columnas 5, 6 y 7.
+    mask_total_clientes = raw[4].astype(str).str.strip() == "Total Clientes :"
     total_rows = raw.loc[mask_total_clientes]
     if not total_rows.empty:
         row = total_rows.iloc[0]
-        total_cargos_aux = pd.to_numeric(row[1], errors="coerce")
-        total_abonos_aux = pd.to_numeric(row[2], errors="coerce")
-        saldo_final_aux = pd.to_numeric(row[3], errors="coerce")
+        total_cargos_aux = pd.to_numeric(row[5], errors="coerce")
+        total_abonos_aux = pd.to_numeric(row[6], errors="coerce")
+        saldo_final_aux = pd.to_numeric(row[7], errors="coerce")
 
     total_cargos_movs = movs_valid["cargos"].sum()
     total_abonos_movs = movs_valid["abonos"].sum()
@@ -358,7 +360,7 @@ else:
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
-        # ---- NUEVO: cálculo de cuentas del auxiliar que NO tienen ninguna factura ----
+        # ---- Cálculo de cuentas del auxiliar que NO tienen ninguna factura ----
         cuentas_con_facturas = (
             facturas_cuenta[["account_code", "account_name"]]
             .drop_duplicates()
