@@ -358,19 +358,41 @@ else:
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
+        # ---- NUEVO: cálculo de cuentas del auxiliar que NO tienen ninguna factura ----
+        cuentas_con_facturas = (
+            facturas_cuenta[["account_code", "account_name"]]
+            .drop_duplicates()
+        )
+
+        aux_sin_facturas = totales_cuentas_aux.merge(
+            cuentas_con_facturas,
+            on=["account_code", "account_name"],
+            how="left",
+            indicator=True,
+        )
+
+        saldo_cuentas_sin_facturas = aux_sin_facturas.loc[
+            aux_sin_facturas["_merge"] == "left_only", "saldo_final_cuenta_aux"
+        ].sum()
+
     if facturas_global.empty and facturas_cuenta.empty:
         st.success("✅ No se encontraron facturas en el archivo.")
     else:
-        # ------------------------- Resumen global (súper simple) -------------------------
+        # ------------------------- Resumen global (netos + cuentas sin facturas) -------------------------
         st.subheader("📊 Resumen global vs auxiliar (netos)")
 
-        colg1, colg2, colg3 = st.columns(3)
+        colg1, colg2, colg3, colg4 = st.columns(4)
         with colg1:
             st.metric(
-                "Saldo neto movimientos (C-A)",
+                "Saldo neto facturas (C-A, solo con referencia)",
                 value=f"${resumen_aux['saldo_neto_movs']:,.2f}",
             )
         with colg2:
+            st.metric(
+                "Saldo cuentas sin facturas (según auxiliar)",
+                value=f"${saldo_cuentas_sin_facturas:,.2f}",
+            )
+        with colg3:
             if resumen_aux.get("saldo_final_aux") is not None:
                 st.metric(
                     "Saldo final cartera (auxiliar – Total Clientes)",
@@ -378,20 +400,16 @@ else:
                 )
             else:
                 st.metric("Saldo final cartera (auxiliar)", value="N/D")
-        with colg3:
-            if (
-                resumen_aux.get("saldo_final_aux") is not None
-                and resumen_aux.get("saldo_neto_movs") is not None
-            ):
-                diferencia_global = (
-                    resumen_aux["saldo_final_aux"] - resumen_aux["saldo_neto_movs"]
-                )
+        with colg4:
+            if resumen_aux.get("saldo_final_aux") is not None:
+                conciliado = resumen_aux["saldo_neto_movs"] + saldo_cuentas_sin_facturas
+                diferencia_residual = resumen_aux["saldo_final_aux"] - conciliado
                 st.metric(
-                    "Diferencia (auxiliar – neto movimientos)",
-                    value=f"${diferencia_global:,.2f}",
+                    "Diferencia residual",
+                    value=f"${diferencia_residual:,.2f}",
                 )
             else:
-                st.metric("Diferencia (auxiliar – neto movimientos)", value="N/D")
+                st.metric("Diferencia residual", value="N/D")
 
         if resumen_aux.get("saldo_inicial_implicito") is not None:
             st.caption(
@@ -399,6 +417,14 @@ else:
                 f"${resumen_aux['saldo_inicial_implicito']:,.2f} "
                 f"(Saldo final auxiliar – saldo neto de movimientos con referencia)."
             )
+
+        st.caption(
+            "- **Saldo neto facturas**: solo movimientos con referencia (lo que se analiza factura por factura).\n"
+            "- **Saldo cuentas sin facturas**: saldos de cuentas que no tienen ninguna factura en el periodo "
+            "(por ejemplo, cuentas con solo saldo inicial).\n"
+            "- La suma de ambos debe aproximarse al **Saldo final cartera (Total Clientes)** del auxiliar; "
+            "cualquier diferencia residual corresponde a redondeos o particularidades del archivo."
+        )
 
         # ------------------------- Filtros globales -------------------------
         all_fechas = pd.concat(
