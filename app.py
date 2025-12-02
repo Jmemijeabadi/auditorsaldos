@@ -11,6 +11,9 @@ UMBRAL_SALDO_INICIAL = 1.0  # en pesos; ajusta si quieres mayor precisión
 
 st.set_page_config(page_title="Facturas no pagadas", layout="wide")
 
+# --------------------------------------------------------------------
+# Encabezado principal
+# --------------------------------------------------------------------
 st.title("🔍 Auditoría Integración de Saldos")
 st.write(
     "Sube el archivo de **Movimientos, Auxiliares del Catálogo** generado desde CONTPAQ i. "
@@ -418,15 +421,19 @@ def to_excel(df: pd.DataFrame) -> bytes:
 
 
 # --------------------------------------------------------------------
-# App
+# App (layout tipo dashboard: sidebar = opciones, main = resultados)
 # --------------------------------------------------------------------
 
-uploaded_file = st.file_uploader(
+# LADO IZQUIERDO: SIDEBAR (archivo + filtros)
+st.sidebar.markdown("## ⚙️ Configuración")
+
+uploaded_file = st.sidebar.file_uploader(
     "📎 Sube el archivo Excel de movimientos (auxiliares del catálogo)",
     type=["xlsx"],
 )
 
 if uploaded_file is None:
+    st.sidebar.info("Sube un archivo `.xlsx` para comenzar.")
     st.info(
         "Sube un archivo `.xlsx` exportado desde CONTPAQ "
         "(Movimientos, Auxiliares del Catálogo) para comenzar."
@@ -457,6 +464,63 @@ else:
             aux_sin_facturas["_merge"] == "left_only", "saldo_final_cuenta_aux"
         ].sum()
 
+        # ------------------------- Filtros (en sidebar) -------------------------
+        # Determinar rango de fechas disponible
+        all_fechas = pd.concat(
+            [
+                facturas_global["fecha_factura"],
+                facturas_cuenta["fecha_factura"],
+            ]
+        ).dropna()
+
+        if all_fechas.empty:
+            min_date = pd.to_datetime(date.today())
+            max_date = pd.to_datetime(date.today())
+        else:
+            min_date = all_fechas.min()
+            max_date = all_fechas.max()
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("## 📌 Filtros")
+
+        fecha_desde = st.sidebar.date_input(
+            "Fecha desde",
+            value=min_date.date() if pd.notna(min_date) else date.today(),
+            min_value=min_date.date() if pd.notna(min_date) else date(2000, 1, 1),
+            max_value=max_date.date() if pd.notna(max_date) else date.today(),
+            key="fecha_desde",
+        )
+
+        fecha_hasta = st.sidebar.date_input(
+            "Fecha hasta",
+            value=max_date.date() if pd.notna(max_date) else date.today(),
+            min_value=min_date.date() if pd.notna(min_date) else date(2000, 1, 1),
+            max_value=max_date.date() if pd.notna(max_date) else date.today(),
+            key="fecha_hasta",
+        )
+
+        # Lista de cuentas para filtrar (opcional)
+        todas_cuentas = (
+            facturas_cuenta["cuenta"].dropna().sort_values().unique().tolist()
+        )
+        opciones_cuentas = ["(Todas las cuentas)"] + todas_cuentas
+        cuenta_seleccionada = st.sidebar.selectbox(
+            "Cuenta contable (opcional)",
+            options=opciones_cuentas,
+            index=0,
+            key="cuenta_seleccionada",
+        )
+
+        # Código de cuenta seleccionada (si aplica)
+        codigo_cuenta_seleccionada = None
+        if cuenta_seleccionada != "(Todas las cuentas)":
+            codigo_cuenta_seleccionada = cuenta_seleccionada.split(" - ")[0].strip()
+
+        # ------------------------- Aplicar filtros de fecha -------------------------
+        facturas_global_f = filtrar_por_fecha(facturas_global, fecha_desde, fecha_hasta)
+        facturas_cuenta_f = filtrar_por_fecha(facturas_cuenta, fecha_desde, fecha_hasta)
+
+    # LADO DERECHO: MAIN (KPIs + tabs + cruces)
     if facturas_global.empty and facturas_cuenta.empty:
         st.success("✅ No se encontraron facturas en el archivo.")
     else:
@@ -529,57 +593,8 @@ else:
             "reclasificaciones o redondeos propios del archivo."
         )
 
-        # ------------------------- Filtros globales -------------------------
-        all_fechas = pd.concat(
-            [
-                facturas_global["fecha_factura"],
-            facturas_cuenta["fecha_factura"],
-            ]
-        ).dropna()
-
-        min_date = all_fechas.min()
-        max_date = all_fechas.max()
-
-        st.subheader("📌 Filtros")
-
-        col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
-        with col_f1:
-            fecha_desde = st.date_input(
-                "Fecha desde",
-                value=min_date.date() if pd.notna(min_date) else None,
-                min_value=min_date.date() if pd.notna(min_date) else None,
-                max_value=max_date.date() if pd.notna(max_date) else None,
-            )
-        with col_f2:
-            fecha_hasta = st.date_input(
-                "Fecha hasta",
-                value=max_date.date() if pd.notna(max_date) else None,
-                min_value=min_date.date() if pd.notna(min_date) else None,
-                max_value=max_date.date() if pd.notna(max_date) else None,
-            )
-        with col_f3:
-            # Lista de cuentas para filtrar (opcional)
-            todas_cuentas = (
-                facturas_cuenta["cuenta"].dropna().sort_values().unique().tolist()
-            )
-            opciones_cuentas = ["(Todas las cuentas)"] + todas_cuentas
-            cuenta_seleccionada = st.selectbox(
-                "Cuenta contable (opcional)",
-                options=opciones_cuentas,
-                index=0,
-            )
-
-        # Código de cuenta seleccionada (si aplica)
-        codigo_cuenta_seleccionada = None
-        if cuenta_seleccionada != "(Todas las cuentas)":
-            codigo_cuenta_seleccionada = cuenta_seleccionada.split(" - ")[0].strip()
-
-        # Aplica filtro de fechas a las dos vistas base
-        facturas_global_f = filtrar_por_fecha(facturas_global, fecha_desde, fecha_hasta)
-        facturas_cuenta_f = filtrar_por_fecha(facturas_cuenta, fecha_desde, fecha_hasta)
-
         # ----------------------------------------------------------------
-        # Pestañas
+        # Pestañas (detalle)
         # ----------------------------------------------------------------
         tab_resumen, tab_pendientes, tab_favor = st.tabs(
             [
