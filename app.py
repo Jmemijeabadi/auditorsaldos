@@ -322,6 +322,82 @@ def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
     return facturas
 
 
+# --------------------------------------------------------------------
+# NUEVA UTILIDAD: detectar cruces de referencias entre cuentas
+# --------------------------------------------------------------------
+@st.cache_data
+def detectar_cruces_referencias(movs_valid: pd.DataFrame):
+    """
+    Detecta referencias (facturas) que aparecen en más de una cuenta contable
+    y que tienen cargos en alguna cuenta y abonos en otra.
+
+    Regresa:
+      - detalle_cruces: nivel cuenta + referencia.
+      - resumen_cruces: nivel referencia (global).
+    """
+    df = movs_valid.copy()
+
+    # Agrupamos por referencia y cuenta
+    por_cuenta = (
+        df.groupby(["referencia", "account_code", "account_name"])
+        .agg(
+            cargos_total=("cargos", "sum"),
+            abonos_total=("abonos", "sum"),
+        )
+        .reset_index()
+    )
+
+    por_cuenta["tiene_cargo"] = por_cuenta["cargos_total"] > 0
+    por_cuenta["tiene_abono"] = por_cuenta["abonos_total"] > 0
+
+    # Nivel referencia (global)
+    ref_level = (
+        por_cuenta.groupby("referencia")
+        .agg(
+            num_cuentas=("account_code", "nunique"),
+            cuentas_con_cargo=("tiene_cargo", "sum"),
+            cuentas_con_abono=("tiene_abono", "sum"),
+            cargos_tot_ref=("cargos_total", "sum"),
+            abonos_tot_ref=("abonos_total", "sum"),
+        )
+        .reset_index()
+    )
+
+    ref_level["saldo_neto_ref"] = ref_level["cargos_tot_ref"] - ref_level["abonos_tot_ref"]
+
+    # Definición de "cruce":
+    # - la referencia aparece en más de una cuenta, y
+    # - hay al menos una cuenta con cargo y otra con abono
+    ref_level["es_cruce"] = (
+        (ref_level["num_cuentas"] > 1)
+        & (ref_level["cuentas_con_cargo"] >= 1)
+        & (ref_level["cuentas_con_abono"] >= 1)
+    )
+
+    resumen_cruces = ref_level[ref_level["es_cruce"]].copy()
+
+    # Traemos el detalle por cuenta solo para esas referencias
+    detalle_cruces = por_cuenta.merge(
+        resumen_cruces[
+            [
+                "referencia",
+                "num_cuentas",
+                "cargos_tot_ref",
+                "abonos_tot_ref",
+                "saldo_neto_ref",
+            ]
+        ],
+        on="referencia",
+        how="inner",
+    )
+
+    detalle_cruces["saldo_por_cuenta"] = (
+        detalle_cruces["cargos_total"] - detalle_cruces["abonos_total"]
+    )
+
+    return detalle_cruces, resumen_cruces
+
+
 def filtrar_por_fecha(df: pd.DataFrame, fecha_desde: date, fecha_hasta: date) -> pd.DataFrame:
     """Filtra un DataFrame por columna fecha_factura."""
     if df.empty:
@@ -360,6 +436,9 @@ else:
         movs_valid, resumen_aux, totales_cuentas_aux = procesar_movimientos(uploaded_file)
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
+
+        # ---- Detección de referencias cruzadas entre cuentas ----
+        detalle_cruces, resumen_cruces = detectar_cruces_referencias(movs_valid)
 
         # ---- Cálculo de cuentas del auxiliar que NO tienen ninguna factura ----
         cuentas_con_facturas = (
@@ -729,3 +808,70 @@ else:
                         "spreadsheetml.sheet"
                     ),
                 )
+
+        # ================================================================
+        # SECCIÓN: Referencias en varias cuentas (cruces)
+        # ================================================================
+        st.subheader("🔁 Referencias en varias cuentas (cargos en una cuenta, abonos en otra)")
+
+        if detalle_cruces.empty:
+            st.info(
+                "No se encontraron referencias que tengan cargos en una cuenta y abonos en otra."
+            )
+        else:
+            num_refs_cruce = resumen_cruces["referencia"].nunique()
+            total_cuentas_afectadas = detalle_cruces["account_code"].nunique()
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric(
+                    "Referencias con cruce entre cuentas",
+                    value=int(num_refs_cruce),
+                )
+            with c2:
+                st.metric(
+                    "Cuentas contables involucradas",
+                    value=int(total_cuentas_afectadas),
+                )
+            with c3:
+                saldo_global_cruces = resumen_cruces["saldo_neto_ref"].sum()
+                st.metric(
+                    "Saldo neto global de estas referencias",
+                    value=f"${saldo_global_cruces:,.2f}",
+                )
+
+            st.caption(
+                "- Se listan referencias que aparecen en **más de una cuenta contable**, "
+                "y que tienen **cargos en alguna cuenta y abonos en otra**.\n"
+                "- Útil para revisar pagos aplicados en cuentas distintas a donde se originó la factura."
+            )
+
+            cols_det = [
+                "referencia",
+                "account_code",
+                "account_name",
+                "cargos_total",
+                "abonos_total",
+                "saldo_por_cuenta",
+                "num_cuentas",
+                "cargos_tot_ref",
+                "abonos_tot_ref",
+                "saldo_neto_ref",
+            ]
+
+            df_cruces_view = detalle_cruces[cols_det].sort_values(
+                ["referencia", "account_code"]
+            )
+
+            st.dataframe(df_cruces_view, use_container_width=True)
+
+            xls_cruces = to_excel(df_cruces_view)
+            st.download_button(
+                label="⬇️ Descargar referencias cruzadas en Excel",
+                data=xls_cruces,
+                file_name="referencias_cruzadas_por_cuenta.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+            )
