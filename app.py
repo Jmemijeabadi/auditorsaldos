@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import math
+import unicodedata
 from io import BytesIO
 from datetime import date
 
@@ -132,11 +133,108 @@ def parse_spanish_date(s: str):
     return pd.to_datetime(date_str, format="%d/%m/%Y", errors="coerce")
 
 
+def _strip_accents(s: str) -> str:
+    """Quita acentos para normalizar texto (DEPÓSITO -> DEPOSITO)."""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    )
+
+
+def normalizar_referencia_base(ref):
+    """
+    Normaliza una referencia de factura para que cargos y abonos se empaten
+    aunque en el auxiliar aparezcan con ligeras variaciones:
+
+    - Ignora mayúsculas/minúsculas y acentos.
+    - Limpia prefijos comunes: FACTURA, FAC, FOLIO, REF, RECIBO, DEPOSITO, PAGO, ABONO.
+    - Limpia prefijo suelto 'F' (F-NCTA8000 -> NCTA8000, F 2428 -> 2428).
+    - Convierte números tipo 2428.0 -> 2428.
+    - Elimina espacios, guiones, slashes y underscores, pero conserva comas.
+    """
+    if pd.isna(ref):
+        return None
+
+    # Si viene como número "puro" desde Excel (int/float)
+    if isinstance(ref, (int, float)) and not math.isnan(ref):
+        s = str(int(ref))
+    else:
+        s = str(ref).strip()
+
+    s = _strip_accents(s).upper()
+
+    # Manejar casos tipo "2428.0" en string
+    if re.fullmatch(r"\d+(\.0+)?", s):
+        s = re.sub(r"\.0+$", "", s)
+
+    # Quitar prefijos verbales comunes
+    s = re.sub(
+        r"^(FACTURA|FAC|FOLIO|REF|REFERENCIA|RECIBO|DEPOSITO|DEPOS|PAGO|ABONO)\s*[:\-]?\s*",
+        "",
+        s,
+    )
+
+    # Quitar prefijo "F" suelto (F-NCTA8000, F 2428, F-1234, etc.)
+    s = re.sub(r"^F\s*[-:]?\s*", "", s)
+
+    # Colapsar espacios múltiples
+    s = " ".join(s.split())
+
+    if not s:
+        return None
+
+    # Eliminar espacios, guiones, slashes y underscores (pero conservar comas)
+    s = re.sub(r"[ \-_/]", "", s)
+
+    # Quitar ".0" o "." final si quedó algo residual
+    s = re.sub(r"\.0+$", "", s)
+    s = re.sub(r"\.$", "", s)
+
+    return s or None
+
+
+def aplicar_normalizacion_referencias(movs_valid: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aplica normalización fuerte de referencias y además hace un mapeo
+    inteligente de referencias solo-numéricas hacia versiones con prefijo,
+    por ejemplo:
+        8224  -> NCTA8224   si ambas aparecen en el archivo.
+    """
+    df = movs_valid.copy()
+
+    # 1) Normalización base (texto limpio, sin "F", ni FAC, etc.)
+    df["referencia_norm_base"] = df["referencia"].apply(normalizar_referencia_base)
+
+    # 2) Construir mapa de números puros -> versión con prefijo NCTA/ANCT/PNCT/NC si existe
+    uniques = pd.Series(df["referencia_norm_base"].dropna().unique(), dtype=object)
+    set_uniques = set(uniques)
+    numeros = [
+        u for u in uniques if isinstance(u, str) and re.fullmatch(r"\d+", u)
+    ]
+    pref_list = ["NCTA", "ANCT", "PNCT", "NC"]
+
+    mapa_num_a_pref = {}
+    for num in numeros:
+        for pref in pref_list:
+            cand = pref + num
+            if cand in set_uniques:
+                mapa_num_a_pref[num] = cand
+                break  # toma el primer prefijo que encuentre
+
+    def _map_final(x):
+        if pd.isna(x):
+            return None
+        return mapa_num_a_pref.get(x, x)
+
+    df["referencia_norm"] = df["referencia_norm_base"].apply(_map_final)
+
+    return df
+
+
 @st.cache_data
 def procesar_movimientos(file):
     """
     Lee el Excel de CONTPAQ y regresa:
-      - movs_valid: movimientos con referencia (y cuenta asignada).
+      - movs_valid: movimientos con referencia (y cuenta asignada), con referencia_norm.
       - resumen_auxiliar: totales globales (netos + saldo final auxiliar).
       - totales_cuentas_aux: totales por cuenta (Total: del auxiliar).
     """
@@ -176,7 +274,7 @@ def procesar_movimientos(file):
     for col in ["cargos", "abonos", "saldo"]:
         movs[col] = pd.to_numeric(movs[col], errors="coerce")
 
-    # Limpiar referencia
+    # Limpiar referencia (texto crudo)
     movs["referencia"] = movs["referencia"].astype(str).str.strip()
     movs["referencia"] = movs["referencia"].replace({"nan": np.nan, "": np.nan})
 
@@ -185,6 +283,9 @@ def procesar_movimientos(file):
 
     # Solo movimientos con referencia
     movs_valid = movs[movs["referencia"].notna()].copy()
+
+    # Aplicar normalización robusta de referencias
+    movs_valid = aplicar_normalizacion_referencias(movs_valid)
 
     # Totales globales del auxiliar ("Total Clientes :")
     total_cargos_aux = np.nan
@@ -209,7 +310,9 @@ def procesar_movimientos(file):
 
     resumen_auxiliar = {
         "saldo_neto_movs": float(saldo_neto_movs),
-        "saldo_final_aux": float(saldo_final_aux) if not math.isnan(saldo_final_aux) else None,
+        "saldo_final_aux": float(saldo_final_aux)
+        if not math.isnan(saldo_final_aux)
+        else None,
         "saldo_inicial_implicito": float(saldo_inicial_implicito)
         if not math.isnan(saldo_inicial_implicito)
         else None,
@@ -251,11 +354,12 @@ def procesar_movimientos(file):
 @st.cache_data
 def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     """
-    Facturas a nivel global (por referencia), cruzando todas las cuentas.
+    Facturas a nivel global (por referencia normalizada), cruzando todas las cuentas.
     Asigna una cuenta principal (normalmente donde está el cargo).
     """
+    # Agrupación por referencia normalizada
     facturas = (
-        movs_valid.groupby("referencia")
+        movs_valid.groupby("referencia_norm")
         .agg(
             fecha_factura=("fecha", "min"),
             cargos_total=("cargos", "sum"),
@@ -267,21 +371,27 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
     movs_valid2 = movs_valid.copy()
     movs_valid2["es_cargo_pos"] = movs_valid2["cargos"] > 0
 
+    # Cuenta principal desde el mayor cargo
     main_from_cargo = (
         movs_valid2[movs_valid2["es_cargo_pos"]]
-        .sort_values(["referencia", "cargos"], ascending=[True, False])
-        .drop_duplicates("referencia")[["referencia", "account_code", "account_name"]]
+        .sort_values(["referencia_norm", "cargos"], ascending=[True, False])
+        .drop_duplicates("referencia_norm")[
+            ["referencia_norm", "account_code", "account_name"]
+        ]
     )
 
+    # Fallback: si no hay cargos, tomamos la primera aparición por fecha
     main_any = (
-        movs_valid2.sort_values(["referencia", "fecha"])
-        .drop_duplicates("referencia")[["referencia", "account_code", "account_name"]]
+        movs_valid2.sort_values(["referencia_norm", "fecha"])
+        .drop_duplicates("referencia_norm")[
+            ["referencia_norm", "account_code", "account_name"]
+        ]
     )
 
     main_account = pd.concat([main_from_cargo, main_any], ignore_index=True)
-    main_account = main_account.drop_duplicates("referencia", keep="first")
+    main_account = main_account.drop_duplicates("referencia_norm", keep="first")
 
-    facturas = facturas.merge(main_account, on="referencia", how="left")
+    facturas = facturas.merge(main_account, on="referencia_norm", how="left")
 
     # Suma neta por referencia
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
@@ -293,15 +403,19 @@ def construir_facturas_global(movs_valid: pd.DataFrame) -> pd.DataFrame:
         + facturas["account_name"].astype(str)
     )
 
+    # Usamos la referencia normalizada como identificador principal en toda la app
+    facturas = facturas.rename(columns={"referencia_norm": "referencia"})
+
     return facturas
 
 
 @st.cache_data
 def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
     """
-    Facturas por cuenta contable (sin cruzar cuentas).
+    Facturas por cuenta contable (sin cruzar cuentas),
+    agrupando por referencia normalizada.
     """
-    group_cols = ["account_code", "account_name", "referencia"]
+    group_cols = ["account_code", "account_name", "referencia_norm"]
     facturas = (
         movs_valid.groupby(group_cols)
         .agg(
@@ -311,6 +425,7 @@ def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+
     facturas["saldo_factura"] = facturas["cargos_total"] - facturas["abonos_total"]
 
     facturas["cuenta"] = (
@@ -318,6 +433,9 @@ def construir_facturas_por_cuenta(movs_valid: pd.DataFrame) -> pd.DataFrame:
         + " - "
         + facturas["account_name"].astype(str)
     )
+
+    # Igual que arriba, usamos la referencia normalizada como columna estándar
+    facturas = facturas.rename(columns={"referencia_norm": "referencia"})
 
     return facturas
 
@@ -331,15 +449,16 @@ def detectar_cruces_referencias(movs_valid: pd.DataFrame):
     Detecta referencias (facturas) que aparecen en más de una cuenta contable
     y que tienen cargos en alguna cuenta y abonos en otra.
 
+    Usa la referencia normalizada para asegurar empates correctos.
     Regresa:
       - detalle_cruces: nivel cuenta + referencia.
       - resumen_cruces: nivel referencia (global).
     """
     df = movs_valid.copy()
 
-    # Agrupamos por referencia y cuenta
+    # Agrupamos por referencia normalizada y cuenta
     por_cuenta = (
-        df.groupby(["referencia", "account_code", "account_name"])
+        df.groupby(["referencia_norm", "account_code", "account_name"])
         .agg(
             cargos_total=("cargos", "sum"),
             abonos_total=("abonos", "sum"),
@@ -352,7 +471,7 @@ def detectar_cruces_referencias(movs_valid: pd.DataFrame):
 
     # Nivel referencia (global)
     ref_level = (
-        por_cuenta.groupby("referencia")
+        por_cuenta.groupby("referencia_norm")
         .agg(
             num_cuentas=("account_code", "nunique"),
             cuentas_con_cargo=("tiene_cargo", "sum"),
@@ -363,7 +482,9 @@ def detectar_cruces_referencias(movs_valid: pd.DataFrame):
         .reset_index()
     )
 
-    ref_level["saldo_neto_ref"] = ref_level["cargos_tot_ref"] - ref_level["abonos_tot_ref"]
+    ref_level["saldo_neto_ref"] = (
+        ref_level["cargos_tot_ref"] - ref_level["abonos_tot_ref"]
+    )
 
     # Definición de "cruce":
     # - la referencia aparece en más de una cuenta, y
@@ -376,24 +497,32 @@ def detectar_cruces_referencias(movs_valid: pd.DataFrame):
 
     resumen_cruces = ref_level[ref_level["es_cruce"]].copy()
 
+    if resumen_cruces.empty:
+        # No hay cruces; devolvemos dataframes vacíos con las columnas esperadas
+        return por_cuenta.head(0), resumen_cruces
+
     # Traemos el detalle por cuenta solo para esas referencias
     detalle_cruces = por_cuenta.merge(
         resumen_cruces[
             [
-                "referencia",
+                "referencia_norm",
                 "num_cuentas",
                 "cargos_tot_ref",
                 "abonos_tot_ref",
                 "saldo_neto_ref",
             ]
         ],
-        on="referencia",
+        on="referencia_norm",
         how="inner",
     )
 
     detalle_cruces["saldo_por_cuenta"] = (
         detalle_cruces["cargos_total"] - detalle_cruces["abonos_total"]
     )
+
+    # Renombrar clave a "referencia" para mantener consistencia en el resto de la app
+    detalle_cruces = detalle_cruces.rename(columns={"referencia_norm": "referencia"})
+    resumen_cruces = resumen_cruces.rename(columns={"referencia_norm": "referencia"})
 
     return detalle_cruces, resumen_cruces
 
@@ -433,7 +562,9 @@ if uploaded_file is None:
     )
 else:
     with st.spinner("Procesando archivo..."):
-        movs_valid, resumen_aux, totales_cuentas_aux = procesar_movimientos(uploaded_file)
+        movs_valid, resumen_aux, totales_cuentas_aux = procesar_movimientos(
+            uploaded_file
+        )
         facturas_global = construir_facturas_global(movs_valid)
         facturas_cuenta = construir_facturas_por_cuenta(movs_valid)
 
@@ -442,8 +573,7 @@ else:
 
         # ---- Cálculo de cuentas del auxiliar que NO tienen ninguna factura ----
         cuentas_con_facturas = (
-            facturas_cuenta[["account_code", "account_name"]]
-            .drop_duplicates()
+            facturas_cuenta[["account_code", "account_name"]].drop_duplicates()
         )
 
         aux_sin_facturas = totales_cuentas_aux.merge(
@@ -505,7 +635,9 @@ else:
         # 5) Diferencia residual vs auxiliar
         with colg5:
             if resumen_aux.get("saldo_final_aux") is not None:
-                conciliado = resumen_aux["saldo_neto_movs"] + saldo_cuentas_sin_facturas
+                conciliado = (
+                    resumen_aux["saldo_neto_movs"] + saldo_cuentas_sin_facturas
+                )
                 diferencia_residual = resumen_aux["saldo_final_aux"] - conciliado
                 st.metric(
                     "Diferencia residual vs auxiliar",
@@ -533,7 +665,7 @@ else:
         all_fechas = pd.concat(
             [
                 facturas_global["fecha_factura"],
-            facturas_cuenta["fecha_factura"],
+                facturas_cuenta["fecha_factura"],
             ]
         ).dropna()
 
@@ -575,8 +707,12 @@ else:
             codigo_cuenta_seleccionada = cuenta_seleccionada.split(" - ")[0].strip()
 
         # Aplica filtro de fechas a las dos vistas base
-        facturas_global_f = filtrar_por_fecha(facturas_global, fecha_desde, fecha_hasta)
-        facturas_cuenta_f = filtrar_por_fecha(facturas_cuenta, fecha_desde, fecha_hasta)
+        facturas_global_f = filtrar_por_fecha(
+            facturas_global, fecha_desde, fecha_hasta
+        )
+        facturas_cuenta_f = filtrar_por_fecha(
+            facturas_cuenta, fecha_desde, fecha_hasta
+        )
 
         # ----------------------------------------------------------------
         # Pestañas
@@ -603,16 +739,26 @@ else:
                 ]
 
             if tot_aux_f.empty:
-                st.info("No hay cuentas en el auxiliar para mostrar con los filtros actuales.")
+                st.info(
+                    "No hay cuentas en el auxiliar para mostrar con los filtros actuales."
+                )
             else:
                 # Métricas por cuenta a partir de las facturas (puede estar vacío si no hay facturas en rango)
                 if not facturas_cuenta_f.empty:
                     metrics = (
-                        facturas_cuenta_f.groupby(["account_code", "account_name"])
+                        facturas_cuenta_f.groupby(
+                            ["account_code", "account_name"]
+                        )
                         .agg(
                             saldo_neto=("saldo_factura", "sum"),
-                            facturas_positivas=("saldo_factura", lambda s: int((s > 0).sum())),
-                            referencias_negativas=("saldo_factura", lambda s: int((s < 0).sum())),
+                            facturas_positivas=(
+                                "saldo_factura",
+                                lambda s: int((s > 0).sum()),
+                            ),
+                            referencias_negativas=(
+                                "saldo_factura",
+                                lambda s: int((s < 0).sum()),
+                            ),
                         )
                         .reset_index()
                     )
@@ -635,11 +781,16 @@ else:
                 )
 
                 # Para cuentas sin ninguna factura en el rango, llenamos con ceros
-                for col in ["saldo_neto", "facturas_positivas", "referencias_negativas"]:
+                for col in [
+                    "saldo_neto",
+                    "facturas_positivas",
+                    "referencias_negativas",
+                ]:
                     resumen_cuenta[col] = resumen_cuenta[col].fillna(0)
 
                 resumen_cuenta["diferencia_vs_auxiliar"] = (
-                    resumen_cuenta["saldo_final_cuenta_aux"] - resumen_cuenta["saldo_neto"]
+                    resumen_cuenta["saldo_final_cuenta_aux"]
+                    - resumen_cuenta["saldo_neto"]
                 )
 
                 resumen_cuenta["saldo_no_explicado_por_facturas"] = resumen_cuenta[
@@ -703,7 +854,9 @@ else:
             df_pend = base_df[base_df["saldo_factura"] > 0].copy()
 
             # Saldo pendiente total (solo facturas con saldo > 0)
-            saldo_pendiente_total = df_pend["saldo_factura"].sum() if not df_pend.empty else 0.0
+            saldo_pendiente_total = (
+                df_pend["saldo_factura"].sum() if not df_pend.empty else 0.0
+            )
 
             # Saldo neto total "real" (según auxiliar)
             if codigo_cuenta_seleccionada is not None:
@@ -715,7 +868,9 @@ else:
                 saldo_neto_total_real = resumen_aux.get("saldo_final_aux")
 
             if df_pend.empty:
-                st.info("No hay facturas pendientes (saldo neto > 0) con estos filtros.")
+                st.info(
+                    "No hay facturas pendientes (saldo neto > 0) con estos filtros."
+                )
             else:
                 total_facturas = df_pend["referencia"].nunique()
 
@@ -788,7 +943,9 @@ else:
             df_favor = base_df_f[base_df_f["saldo_factura"] < 0].copy()
 
             if df_favor.empty:
-                st.info("No hay facturas con saldo a favor (saldo neto < 0) con estos filtros.")
+                st.info(
+                    "No hay facturas con saldo a favor (saldo neto < 0) con estos filtros."
+                )
             else:
                 total_refs = df_favor["referencia"].nunique()
                 saldo_total_favor = df_favor["saldo_factura"].sum()
@@ -833,7 +990,9 @@ else:
         # ================================================================
         # SECCIÓN: Referencias en varias cuentas (cruces)
         # ================================================================
-        st.subheader("🔁 Referencias en varias cuentas (cargos en una cuenta, abonos en otra)")
+        st.subheader(
+            "🔁 Referencias en varias cuentas (cargos en una cuenta, abonos en otra)"
+        )
 
         if detalle_cruces.empty:
             st.info(
