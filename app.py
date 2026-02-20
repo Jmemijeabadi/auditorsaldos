@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Auditoría Master CONTPAQ", layout="wide", page_icon="🛡️")
 UMBRAL_TOLERANCIA = 1.0 
 
-st.title("🛡️ Auditoría Master de Saldos (Híbrido)")
+st.title("🛡️ Auditoría Master de Saldos (Contpaq)")
 st.markdown("""
 Esta herramienta combina:
 1. **Lectura Blindada:** Soporta Excel/CSV y detecta errores en el archivo.
